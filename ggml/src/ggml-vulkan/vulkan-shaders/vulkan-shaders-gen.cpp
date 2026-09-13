@@ -948,6 +948,8 @@ void process_shaders() {
     string_to_spv("concat_i16", "concat.comp", {{"A_TYPE", "uint16_t"}, {"B_TYPE", "uint16_t"}, {"D_TYPE", "uint16_t"}});
     string_to_spv("concat_i32", "concat.comp", {{"A_TYPE", "uint"}, {"B_TYPE", "uint"}, {"D_TYPE", "uint"}});
     string_to_spv("concat_i64", "concat.comp", {{"A_TYPE", "uvec2"}, {"B_TYPE", "uvec2"}, {"D_TYPE", "uvec2"}});
+    // CachyLLama: tiled-transpose kernel for dim-0 concat with transposed src1
+    string_to_spv("concat_transpose_i32", "concat_transpose.comp", {{"A_TYPE", "uint"}, {"B_TYPE", "uint"}, {"D_TYPE", "uint"}});
 
     string_to_spv("upscale_f32", "upscale.comp", {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}});
 
@@ -1101,6 +1103,11 @@ void process_shaders() {
 
     string_to_spv("count_experts", "count_experts.comp", merge_maps(base_dict, {{"A_TYPE", "uint"}, {"D_TYPE", "uint"}}));
     string_to_spv("count_experts_subgroup", "count_experts.comp", merge_maps(base_dict, {{"A_TYPE", "uint"}, {"D_TYPE", "uint"}, {"USE_SUBGROUPS", "1"}}));
+    // CachyLLama: grouped-GEMM row-list prepass pipeline and top-k-aware sparse FA shader
+    // (C2/Gaetan Puleo) - the top-k shader is compiled but dispatch requires the
+    // ggml_flash_attn_ext_add_top_k API change + DSv4 model integration.
+    string_to_spv("mmid_row_lists", "mmid_row_lists.comp", {});
+    string_to_spv("flash_attn_top_k_f16", "flash_attn_top_k.comp", {});
 
     for (std::string dim_str : {"", "_3d"}) {
         for (bool bda : {false, true}) {
@@ -1136,6 +1143,11 @@ void process_shaders() {
     std::map<std::string, std::string> li_dict = {{"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV4", "vec4"}, {"DATA_A_IQ4_NL", "1"}};
     string_to_spv("lightning_indexer_f32", "lightning_indexer.comp", li_dict);
     string_to_spv("lightning_indexer_subgroup_f32", "lightning_indexer.comp", merge_maps(li_dict, {{"USE_SUBGROUP_ADD", "1"}}));
+    // CachyLLama: coopmat variants of the lightning indexer (prefill + decode paths)
+    // for Head_SIZE=128, N_HEAD=64, K=F16 only. Dispatch falls back to the scalar
+    // f32 path when pre-conditions don't match. See ggml-vulkan.cpp.
+    string_to_spv("lightning_indexer_cm_f16", "lightning_indexer_cm.comp", {});
+    string_to_spv("lightning_indexer_decode_cm_f16", "lightning_indexer_decode_cm.comp", {});
 
     string_to_spv("rwkv_wkv7_f32", "wkv7.comp", merge_maps(base_dict, {{"A_TYPE", "float"}}));
 

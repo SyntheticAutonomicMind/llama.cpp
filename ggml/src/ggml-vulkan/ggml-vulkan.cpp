@@ -651,7 +651,8 @@ enum shader_reduction_mode {
 // argsort pipelines for up to 1<<10 invocations per workgroup
 static constexpr uint32_t num_argsort_pipelines = 11;
 static constexpr uint32_t num_topk_moe_pipelines = 10;
-static constexpr uint32_t num_topk_pipelines = 11;
+// CachyLLama: widened from 11 to 14 for QSA indexer gather (qwen4exp QSA top_k with n_sel=2051)
+static constexpr uint32_t num_topk_pipelines = 14;
 
 static constexpr std::initializer_list<ggml_op> topk_moe_early_softmax_norm{ GGML_OP_SOFT_MAX, GGML_OP_RESHAPE,  GGML_OP_ARGSORT,
                                                                              GGML_OP_VIEW,     GGML_OP_GET_ROWS, GGML_OP_RESHAPE,
@@ -901,6 +902,7 @@ struct vk_device_struct {
     bool add_rms_fusion;
     uint32_t partials_binding_alignment;
     uint32_t max_nodes_per_submit;
+    uint64_t max_bytes_per_submit;
 
     bool shader_64b_indexing;
 
@@ -1012,6 +1014,7 @@ struct vk_device_struct {
 
     vk_pipeline pipeline_add_id_f32;
 
+    vk_pipeline pipeline_concat_transpose_i32;
     vk_pipeline pipeline_concat_i8, pipeline_concat_i16, pipeline_concat_i32, pipeline_concat_i64;
     vk_pipeline pipeline_upscale_nearest_f32, pipeline_upscale_bilinear_f32, pipeline_upscale_bicubic_f32, pipeline_upscale_bilinear_antialias_f32;
     vk_pipeline pipeline_scale_f32;
@@ -1149,6 +1152,12 @@ struct vk_device_struct {
     vk_pipeline pipeline_rwkv_wkv7_f32;
     vk_pipeline pipeline_gated_linear_attn_f32;
     vk_pipeline pipeline_lightning_indexer_f32[GGML_TYPE_COUNT];
+    // CachyLLama: coopmat variants of the lightning indexer for tensor-core acceleration on
+    // prefill (n_batch > 1) and decode (n_batch == 1). Both are f16 K-cache, N_HEAD=64,
+    // HEAD_SIZE=128 only - anything else falls back to pipeline_lightning_indexer_f32 above.
+    // Pipeline nullptr when coopmat1 16x16x16 f16-acc + subgroup_size_control aren't both available.
+    vk_pipeline pipeline_lightning_indexer_cm_f16;
+    vk_pipeline pipeline_lightning_indexer_decode_cm_f16;
     // [size_idx][kda] where size_idx: 0=d16, 1=d32, 2=d64, 3=d128
     vk_pipeline pipeline_gated_delta_net[4][2];
     vk_pipeline pipeline_ssm_scan_f32_d128;
@@ -2014,6 +2023,41 @@ struct vk_op_lightning_indexer_push_constants {
     uint32_t d_nb3;
 };
 static_assert(sizeof(vk_op_lightning_indexer_push_constants) <= 128);
+
+// Coopmat prefill/decode variants (lightning_indexer_cm.comp / _decode_cm.comp) use a
+// distinct push-constant layout: HEAD_SIZE=128, N_HEAD=64 and K=F16 are all hardcoded in the
+// shader so they aren't parameters. All strides are element-based: the cm shaders declare
+// buffers as typed arrays (float/float16_t) and index by element, so strides must be
+// element strides (nb/type_size), not byte strides.
+struct vk_op_lightning_indexer_cm_push_constants {
+    uint32_t n_kv;
+    uint32_t n_batch;
+    uint32_t n_stream;
+    uint32_t nem3;
+    // dst element strides (ne[1] = n_kv, ne[3] = n_stream; ne[2] = 1 and skipped).
+    uint32_t nb1;
+    uint32_t nb3;
+    // Q element strides: ne[1] = n_head, ne[2] = n_batch, ne[3] = n_stream.
+    uint32_t nbq1;
+    uint32_t nbq2;
+    uint32_t nbq3;
+    // K element strides: float16_t data_k[] indexes by element, so use element strides.
+    uint32_t nbk2;
+    uint32_t nbk3;
+    uint32_t nbw1;
+    uint32_t nbw3;
+    uint32_t nbm1;
+    uint32_t nbm3;
+
+    uint32_t q_offset;
+    uint32_t k_offset;
+    uint32_t w_offset;
+    uint32_t m_offset;
+    uint32_t d_offset;
+};
+static_assert(sizeof(vk_op_lightning_indexer_cm_push_constants) <= 128,
+              "sizeof(vk_op_lightning_indexer_cm_push_constants) must be <= 128");
+
 struct vk_op_gated_delta_net_push_constants {
     uint32_t H;
     uint32_t n_tokens;
@@ -2288,6 +2332,16 @@ static bool vk_enable_sync_logger = false;
 // number of calls between perf logger prints
 static uint32_t vk_perf_logger_frequency = 1;
 static std::string vk_pipeline_stats_filter;
+
+static uint64_t ggml_vk_get_node_bytes(const ggml_tensor * node) {
+    uint64_t bytes = ggml_nbytes(node);
+    for (int i = 0; i < GGML_MAX_SRC; i++) {
+        if (node->src[i]) {
+            bytes += ggml_nbytes(node->src[i]);
+        }
+    }
+    return bytes;
+}
 
 static uint64_t ggml_vk_get_node_flops(const ggml_tensor * node) {
     if (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) {
@@ -2639,6 +2693,33 @@ static uint32_t ggml_vk_concat_unit_size(ggml_type type) {
     return 1;
 }
 
+// Tiled-transpose dispatch gate for dim-0 concat whose src1 is actually transposed.
+// The generic kernel reads src1 with the transposed stride, so neighbouring lanes touch
+// different cache lines; the tiled-transpose kernel (concat_transpose.comp) stages a
+// 32x32 tile in shared memory instead, keeping both the load and store coalesced.
+//
+// On by default to match the rest of the f16 KV / quant-KV opt-in pattern; =0 disables.
+static bool ggml_vk_concat_is_transposed(const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst) {
+    static const char * env = getenv("GGML_VK_CONCAT_TRANSPOSE");
+    if (!(env && atoi(env) != 0)) {
+        return false;
+    }
+    if (ggml_get_op_params_i32(dst, 0) != 0) {           // dim 0 only
+        return false;
+    }
+    if (src0->ne[2] != 1 || src0->ne[3] != 1 || src1->ne[2] != 1 || src1->ne[3] != 1) {
+        return false;
+    }
+    const size_t ts = ggml_type_size(src0->type);
+    if (src0->nb[0] != ts || dst->nb[0] != ts) {          // src0 and dst rows must be contiguous
+        return false;
+    }
+    if (src1->nb[0] <= src1->nb[1]) {                     // src1 must actually be transposed
+        return false;
+    }
+    return src0->ne[1] == src1->ne[1] && dst->ne[1] == src1->ne[1];
+}
+
 static bool ggml_vk_concat_supported(const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst) {
     if (src0->type != src1->type || src0->type != dst->type) {
         return false;
@@ -2724,6 +2805,19 @@ template <> void init_pushconst_tensor_offsets(ggml_backend_vk_context * ctx, vk
     p.r_offset = get_misalign_bytes(ctx, src1) / ggml_type_size(src1->type);
     p.p_offset = get_misalign_bytes(ctx, src2) / ggml_type_size(src2->type);
     p.c_offset = get_misalign_bytes(ctx, src3) / ggml_type_size(src3->type);
+    p.d_offset = get_misalign_bytes(ctx, dst)  / ggml_type_size(dst->type);
+}
+
+template <> void init_pushconst_tensor_offsets(ggml_backend_vk_context * ctx, vk_op_lightning_indexer_cm_push_constants &p, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, const ggml_tensor * src3, ggml_tensor * dst) {
+    // The cm shaders do not use the *_offset fields: buffers are bound via
+    // vk_subbuffer which already includes the tensor's byte offset, so the
+    // shader indexes from the start of the tensor data. These offsets are
+    // set for completeness but are not read by the shader's push constant
+    // block.
+    p.q_offset = get_misalign_bytes(ctx, src0) / ggml_type_size(src0->type);
+    p.k_offset = get_misalign_bytes(ctx, src1);
+    p.w_offset = get_misalign_bytes(ctx, src2) / ggml_type_size(src2->type);
+    p.m_offset = get_misalign_bytes(ctx, src3) / ggml_type_size(src3->type);
     p.d_offset = get_misalign_bytes(ctx, dst)  / ggml_type_size(dst->type);
 }
 
@@ -5923,6 +6017,8 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     ggml_vk_create_pipeline(device, device->pipeline_concat_i16, "concat_i16", concat_i16_len, concat_i16_data, "main", 3, sizeof(vk_op_binary_push_constants), {512, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_concat_i32, "concat_i32", concat_i32_len, concat_i32_data, "main", 3, sizeof(vk_op_binary_push_constants), {512, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_concat_i64, "concat_i64", concat_i64_len, concat_i64_data, "main", 3, sizeof(vk_op_binary_push_constants), {512, 1, 1}, {}, 1);
+    // One workgroup per 32x32 tile: elements are passed as (rows, cols, 1).
+    ggml_vk_create_pipeline(device, device->pipeline_concat_transpose_i32, "concat_transpose_i32", concat_transpose_i32_len, concat_transpose_i32_data, "main", 3, sizeof(vk_op_binary_push_constants), {32, 32, 1}, {}, 1);
 
     ggml_vk_create_pipeline(device, device->pipeline_upscale_nearest_f32, "upscale_f32", upscale_f32_len, upscale_f32_data, "main", 2, sizeof(vk_op_upscale_push_constants), {512, 1, 1}, {GGML_SCALE_MODE_NEAREST}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_upscale_bilinear_f32, "upscale_f32", upscale_f32_len, upscale_f32_data, "main", 2, sizeof(vk_op_upscale_push_constants), {512, 1, 1}, {GGML_SCALE_MODE_BILINEAR}, 1);
@@ -6201,6 +6297,37 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             const std::string name = "lightning_indexer_" + std::string(ggml_type_name(k_type)) + "_k_f32";
             ggml_vk_create_pipeline(device, device->pipeline_lightning_indexer_f32[k_type], name.c_str(), li_len, li_data, "main", 5, sizeof(vk_op_lightning_indexer_push_constants), {1, 1, 1}, {(uint32_t)k_type, fa_block_bytes(k_type), device->subgroup_size}, 1, true, li_subgroup);
         }
+    }
+
+    // Coopmat prefill + decode variants of the lightning indexer. Both shaders
+    // hardcode HEAD_SIZE=128, N_HEAD=64 and assume K is F16, so the dispatch in
+    // ggml_vk_lightning_indexer() picks the scalar f32 path when those don't
+    // match. The cm shaders use GL_KHR_cooperative_matrix (subgroup-scoped
+    // 16x16x16 f16 fragments); on RDNA3 wave64 each warp does a 16x16 GEMM and
+    // accumulates over N_HEAD=64 heads. We pin the subgroup size to whatever
+    // the device reports because the shader's SUBGROUP_SIZE spec constant also
+    // drives local_size_x via local_size_x_id=0 - both have to match the
+    // hardware subgroup or coopmat's WMMA layout is wrong. Coopmat1 16x16x16
+    // f16-acc + subgroup_size_control + (32 or 64) subgroup are all required;
+    // on devices that have coopmat2 but no usable 16x16x16 cm1 (very rare) we
+    // fall back to the scalar path.
+    if (device->coopmat_support && device->coopmat_support_16x16x16_f16acc &&
+        device->subgroup_size_control &&
+        (device->subgroup_size == 32 || device->subgroup_size == 64)) {
+        // Prefill: wg_denoms {16,16,1} means grid = (n_kv/16, n_batch/16, n_stream).
+        const uint32_t li_cm_prefill_sg = device->subgroup_size;
+        ggml_vk_create_pipeline(device, device->pipeline_lightning_indexer_cm_f16,
+            "lightning_indexer_cm_f16", lightning_indexer_cm_f16_len, lightning_indexer_cm_f16_data,
+            "main", 5, sizeof(vk_op_lightning_indexer_cm_push_constants),
+            { 16, 16, 1 }, { li_cm_prefill_sg }, 1, true, true, li_cm_prefill_sg);
+        // Decode: wg_denoms {16,1,1}. required_subgroup_size=32 forces 32 threads on
+        // wave64 to avoid the dst-store race (lanes >=TILE=16 are idle).
+        const uint32_t li_cm_decode_sg =
+            (device->subgroup_size == 64) ? 32u : device->subgroup_size;
+        ggml_vk_create_pipeline(device, device->pipeline_lightning_indexer_decode_cm_f16,
+            "lightning_indexer_decode_cm_f16", lightning_indexer_decode_cm_f16_len, lightning_indexer_decode_cm_f16_data,
+            "main", 5, sizeof(vk_op_lightning_indexer_cm_push_constants),
+            { 16, 1, 1 }, { li_cm_decode_sg }, 1, true, true, li_cm_decode_sg);
     }
 
     {
@@ -6799,11 +6926,28 @@ static vk_device ggml_vk_get_device(size_t idx) {
                                 (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eVote);
 
         // Submit at least every 100 nodes, in case there are workloads without as much matmul.
-        device->max_nodes_per_submit = 100;
+        // CachyLLama: raised from 8 (UMA) / 100 (discrete) to a universal 64.
+        // On RDNA3 UMA (Phoenix/Strix Halo) nps=100 was +4.5% on tg64 over nps=8
+        // (Qwen3.6-35B Q4_K_XL); nps=64 gets ~93% of that gain while staying
+        // well under the amdgpu lockup_timeout on any UMA device, and removes
+        // the UMA/discrete special case. See RDNA3_NOTES.md.
+        // Users can override via GGML_VK_NODES_PER_SUBMIT.
+        device->max_nodes_per_submit = 64;
         const char* GGML_VK_MAX_NODES_PER_SUBMIT = getenv("GGML_VK_MAX_NODES_PER_SUBMIT");
-        if (GGML_VK_MAX_NODES_PER_SUBMIT != nullptr) {
-            uint32_t max_nodes_per_submit = std::stoul(GGML_VK_MAX_NODES_PER_SUBMIT);
+        const char* GGML_VK_NODES_PER_SUBMIT    = getenv("GGML_VK_NODES_PER_SUBMIT");
+        const char * env_val = GGML_VK_NODES_PER_SUBMIT ? GGML_VK_NODES_PER_SUBMIT : GGML_VK_MAX_NODES_PER_SUBMIT;
+        if (env_val != nullptr) {
+            uint32_t max_nodes_per_submit = std::stoul(env_val);
             device->max_nodes_per_submit = std::max(max_nodes_per_submit, 1u);
+        }
+
+        // Also submit once a batch has accumulated enough memory traffic, so that
+        // bandwidth-bound nodes with no flops estimate cannot grow a command buffer
+        // past the driver timeout. 0 disables the limit.
+        device->max_bytes_per_submit = 8ull * 1024 * 1024 * 1024;
+        const char* GGML_VK_MAX_MB_PER_SUBMIT = getenv("GGML_VK_MAX_MB_PER_SUBMIT");
+        if (GGML_VK_MAX_MB_PER_SUBMIT != nullptr) {
+            device->max_bytes_per_submit = std::stoull(GGML_VK_MAX_MB_PER_SUBMIT) * 1024 * 1024;
         }
 
         const bool force_disable_f16 = getenv("GGML_VK_DISABLE_F16") != nullptr;
@@ -11659,6 +11803,11 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
         if (!ggml_vk_concat_supported(src0, src1, dst)) {
             return nullptr;
         }
+        // Tiled-transpose path handles unquantized 4-byte elements only.
+        if (!ggml_is_quantized(src0->type) && ggml_vk_concat_unit_size(src0->type) == 4 &&
+            ggml_vk_concat_is_transposed(src0, src1, dst)) {
+            return ctx->device->pipeline_concat_transpose_i32;
+        }
         switch (ggml_vk_concat_unit_size(src0->type)) {
         case 1:
             return ctx->device->pipeline_concat_i8;
@@ -12704,6 +12853,11 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
             if (op == GGML_OP_CONCAT && ggml_is_quantized(dst->type)) {
                 ne = ne / ggml_blck_size(dst->type) * ggml_type_size(dst->type) / ggml_vk_concat_unit_size(dst->type);
             }
+            // The tiled concat_transpose kernel is dispatched per 32x32 tile, not per element.
+            if (op == GGML_OP_CONCAT && pipeline == ctx->device->pipeline_concat_transpose_i32) {
+                elements = { (uint32_t)src1->ne[1], (uint32_t)src1->ne[0], 1 };
+                break;
+            }
             // copy_to_quant has block size of 32, and each thread does QUANT_K elements.
             // Splitting into 512x512xZ wouldn't work well since each workgroup does 1024 elements.
             // So divide by block size here before splitting into 512x512 groups.
@@ -13235,12 +13389,80 @@ static void ggml_vk_lightning_indexer(ggml_backend_vk_context * ctx, vk_context&
     const ggml_tensor * w = dst->src[2];
     const ggml_tensor * m = dst->src[3];
 
+    // Path selection. The coopmat variants (lightning_indexer_cm_f16 for
+    // prefill, lightning_indexer_decode_cm_f16 for decode) are strictly faster
+    // when their pre-conditions hold - they do a 16x16 GEMM per head tile on
+    // RDNA3's WMMA units and accumulate over N_HEAD=64 in registers, vs the
+    // scalar shader's K-in-shmem 32-lane dot product. Constraints come from
+    // what the cm shaders hardcode (HEAD_SIZE=128, N_HEAD=64, K must be F16)
+    // plus the 16x16 tile alignment the workgroup geometry assumes. Anything
+    // that doesn't match falls back to the scalar f32 path.
+    const uint32_t n_embd   = (uint32_t) q->ne[0];
+    const uint32_t n_head   = (uint32_t) q->ne[1];
+    const uint32_t n_batch  = (uint32_t) q->ne[2];
+    const uint32_t n_stream = (uint32_t) q->ne[3];
+    const uint32_t nem3     = (uint32_t) m->ne[3];
+    const uint32_t n_kv     = (uint32_t) k->ne[2];
+
+    const bool cm_prefill_ok =
+        n_embd == 128 &&
+        n_head == 64 &&
+        k->type == GGML_TYPE_F16 &&
+        (n_kv % 16u) == 0u &&
+        (n_batch >= 16u && (n_batch % 16u) == 0u) &&
+        ctx->device->pipeline_lightning_indexer_cm_f16 != nullptr;
+
+    const bool cm_decode_ok =
+        n_embd == 128 &&
+        n_head == 64 &&
+        k->type == GGML_TYPE_F16 &&
+        (n_kv % 16u) == 0u &&
+        n_batch == 1u &&
+        ctx->device->pipeline_lightning_indexer_decode_cm_f16 != nullptr;
+
+    if (cm_prefill_ok || cm_decode_ok) {
+        const bool decode_only = !cm_prefill_ok;
+        vk_pipeline pipeline = decode_only
+            ? ctx->device->pipeline_lightning_indexer_decode_cm_f16
+            : ctx->device->pipeline_lightning_indexer_cm_f16;
+        GGML_ASSERT(pipeline != nullptr);
+
+        ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+
+        const vk_subbuffer q_buf = ggml_vk_tensor_subbuffer(ctx, q,    true);
+        const vk_subbuffer k_buf = ggml_vk_tensor_subbuffer(ctx, k,    true);
+        const vk_subbuffer w_buf = ggml_vk_tensor_subbuffer(ctx, w,    true);
+        const vk_subbuffer m_buf = ggml_vk_tensor_subbuffer(ctx, m,    true);
+        const vk_subbuffer d_buf = ggml_vk_tensor_subbuffer(ctx, dst,  true);
+
+        vk_op_lightning_indexer_cm_push_constants pc = {
+            n_kv, n_batch, n_stream, nem3,
+            ggml_vk_nb_elem(dst, 1),
+            ggml_vk_nb_elem(dst, 3),
+            ggml_vk_nb_elem(q, 1),
+            ggml_vk_nb_elem(q, 2),
+            ggml_vk_nb_elem(q, 3),
+            ggml_vk_nb_elem(k, 2),  // element stride: float16_t[] indexes by element
+            ggml_vk_nb_elem(k, 3),
+            ggml_vk_nb_elem(w, 1),
+            ggml_vk_nb_elem(w, 3),
+            ggml_vk_nb_elem(m, 1),
+            ggml_vk_nb_elem(m, 3),
+            0, 0, 0, 0, 0,
+        };
+        init_pushconst_tensor_offsets(ctx, pc, q, k, w, m, dst);
+
+        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
+            { q_buf, k_buf, w_buf, m_buf, d_buf }, pc,
+            { n_kv, n_batch, n_stream });
+        return;
+    }
+
     vk_pipeline pipeline = ggml_vk_op_get_pipeline(ctx, q, k, w, dst, dst->op);
     GGML_ASSERT(pipeline != nullptr);
 
     ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
 
-    const uint32_t n_kv      = k->ne[2];
     const uint32_t n_heads   = q->ne[1];
     const uint32_t n_tokens  = q->ne[2];
     const uint32_t n_streams = q->ne[3];
@@ -18085,6 +18307,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
     uint32_t submitted_nodes = 0;
     uint32_t submit_count = 0;
     uint64_t batch_flops = 0;
+    uint64_t batch_bytes = 0;
     uint64_t total_flops = 0;
     uint64_t flops_cap = 200'000'000'000ULL;
 
@@ -18122,6 +18345,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         first_node_in_batch = true;
         submitted_nodes = 0;
         batch_flops = 0;
+        batch_bytes = 0;
         if (submit_count < 3) {
             flops_per_submit *= 2;
         }
@@ -18149,6 +18373,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             }
 
             batch_flops += node_flops;
+        batch_bytes += ggml_vk_get_node_bytes(cgraph->nodes[i]);
         }
 
         // op_srcs_fused_elementwise indicates whether an op's srcs all contribute to
@@ -18403,6 +18628,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         bool almost_ready = (cgraph->n_nodes - i) < cgraph->n_nodes / 5;
         bool submit = (submitted_nodes >= ctx->device->max_nodes_per_submit) ||
                       (flops_per_submit != 0 && batch_flops >= flops_per_submit) ||
+                      (ctx->device->max_bytes_per_submit != 0 && batch_bytes >= ctx->device->max_bytes_per_submit) ||
                       (i + ctx->num_additional_fused_ops >= last_node) ||
                       (almost_ready && !ctx->almost_ready_fence_pending);
 
