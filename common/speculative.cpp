@@ -619,6 +619,29 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
             }
         }
 
+        // sanitize non-finite feature values before fusing. on Metal, the
+        // mat-mat kernels stage f32 activations as f16 for the simdgroup
+        // multiply; Laguna's massive-activation rows (attention-sink tokens,
+        // |x| ~ 1e6 in the pre-final-norm residual) overflow f16 -> inf/nan.
+        // one poisoned row would otherwise NaN the whole drafter KV cache.
+        {
+            size_t n_bad = 0;
+            for (auto & v : features_buf) {
+                if (!std::isfinite(v)) {
+                    v = v != v ? 0.0f : (v > 0.0f ? 65504.0f : -65504.0f);
+                    n_bad++;
+                }
+            }
+            if (n_bad > 0) {
+                static bool warned = false;
+                if (!warned) {
+                    LOG_WRN("%s: sanitized %zu non-finite target feature values (f16 overflow on massive activations); "
+                            "draft quality may degrade slightly on affected rows\n", __func__, n_bad);
+                    warned = true;
+                }
+            }
+        }
+
         g_embd_buf.resize((size_t) n_tokens * n_embd_dec);
 
         // llama_encode() requires the full encoder batch to fit in n_ubatch.

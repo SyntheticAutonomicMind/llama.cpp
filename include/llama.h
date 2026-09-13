@@ -751,6 +751,20 @@ extern "C" {
                  llama_pos p0,
                  llama_pos p1);
 
+    // Remove sequence range from the attention KV cache only, preserving
+    // recurrent/SSM state. For hybrid/recurrent memory types, clears attention
+    // cells AND stale position tracking in the recurrent cache (via
+    // seq_rm_positions_only) without modifying R/S tensor data or triggering the
+    // n_rs_seq rollback path. For non-hybrid models, falls back to seq_rm.
+    // seq_id < 0 : match any sequence [TAG_LLAMA_SEQ_ID_NEG]
+    // p0 < 0     : [0,  p1]
+    // p1 < 0     : [p0, inf)
+    LLAMA_API bool llama_memory_seq_rm_attn_only(
+            llama_memory_t mem,
+              llama_seq_id seq_id,
+                 llama_pos p0,
+                 llama_pos p1);
+
     // Copy all tokens that belong to the specified sequence to another sequence
     // p0 < 0 : [0,  p1]
     // p1 < 0 : [p0, inf)

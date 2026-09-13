@@ -1367,6 +1367,9 @@ struct llama_model_dflash : public llama_model_base {
         graph(const llama_model & model, const llm_graph_params & params);
 
         ggml_tensor * build_inp_embd_enc() const;
+
+        // DFlash encoder: per-aux-feature RMSNorm (Laguna drafters)
+        ggml_tensor * aux_norm = nullptr;
     };
 
     struct graph_dsv4 : public llama_model_deepseek4::graph {
@@ -1374,6 +1377,8 @@ struct llama_model_dflash : public llama_model_base {
     };
 
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
+
+    bool decoder_laguna = false;
 };
 
 

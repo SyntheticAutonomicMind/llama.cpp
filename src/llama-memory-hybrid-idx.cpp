@@ -161,6 +161,20 @@ bool llama_memory_hybrid_idx::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_po
     return get_mem_attn()->seq_rm(seq_id, p0, p1);
 }
 
+bool llama_memory_hybrid_idx::seq_rm_attn_only(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    // Qwen4Exp (QSA) mirrors the indexer cache onto the attention cache, so
+    // they must carry the same seq_id bookkeeping for the same cell indices.
+    // llama_memory_hybrid::seq_rm_attn_only strips attn cells AND clears stale
+    // position tracking in mem_recr (without touching R/S data, avoiding the
+    // n_rs_seq rollback failure), but leaves the indexer untouched. On qwen4exp
+    // that desyncs the indexer from the attention cache. The indexer is a
+    // kv_cache (not recurrent), so its seq_rm has no rollback path to fail.
+    if (mem_idx) {
+        mem_idx->seq_rm(seq_id, p0, p1);
+    }
+    return llama_memory_hybrid::seq_rm_attn_only(seq_id, p0, p1);
+}
+
 void llama_memory_hybrid_idx::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
     llama_memory_hybrid::seq_cp(seq_id_src, seq_id_dst, p0, p1);
 
