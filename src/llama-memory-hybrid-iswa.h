@@ -63,7 +63,7 @@ public:
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
     // clears stale position tracking in the recurrent cache for the
     // same range via seq_rm_positions_only (bypasses n_rs_seq rollback).
-    bool seq_rm_attn_only(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
+    bool seq_rm_attn_only(llama_seq_id seq_id, llama_pos p0, llama_pos p1) override;
     void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) override;
     void seq_keep(llama_seq_id seq_id)                                                          override;
     void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) override;

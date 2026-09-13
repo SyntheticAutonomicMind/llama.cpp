@@ -1108,7 +1108,7 @@ static common_chat_params common_chat_params_init_laguna(const common_chat_templ
     data.format             = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking  = true;
     data.thinking_start_tag = "";  // nominal; the block is force-opened by the template
-    data.thinking_end_tag   = THINK_END;
+    data.thinking_end_tags.push_back(THINK_END);
     data.preserved_tokens   = { TOOL_CALL_START, TOOL_CALL_END, THINK_END };
 
     auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();
@@ -1152,15 +1152,6 @@ static common_chat_params common_chat_params_init_laguna(const common_chat_templ
     if (include_grammar) {
         data.grammar_lazy = !(has_response_format || (has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED));
         data.grammar      = build_grammar([&](const common_grammar_builder & builder) {
-            foreach_function(inputs.tools, [&](const json & tool) {
-                const auto & function = tool.at("function");
-                auto         schema   = function.at("parameters");
-                builder.resolve_refs(schema);
-            });
-            if (has_response_format) {
-                auto schema = inputs.json_schema;
-                builder.resolve_refs(schema);
-            }
             parser.build_grammar(builder, data.grammar_lazy);
         });
         data.grammar_triggers = {

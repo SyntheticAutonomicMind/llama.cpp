@@ -103,6 +103,7 @@ void llama_model_dflash::load_arch_hparams(llama_model_loader & ml) {
 void llama_model_dflash::load_arch_tensors(llama_model_loader &) {
     LLAMA_LOAD_LOCALS;
 
+    const auto & model_df = static_cast<const llama_model_dflash &>(*this);
     const int64_t n_embd_inp = hparams.n_embd_inp_enc();
 
     tok_embd        = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD,       "weight"), { n_embd, n_vocab }, TENSOR_NOT_REQUIRED);

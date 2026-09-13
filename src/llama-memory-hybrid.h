@@ -63,7 +63,7 @@ public:
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
     // cache must be preserved). Returns true on success. virtual so the qsa
     // hybrid_idx subclass can extend it to also clear the indexer cache.
-    bool seq_rm_attn_only(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
+    bool seq_rm_attn_only(llama_seq_id seq_id, llama_pos p0, llama_pos p1) override;
     void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) override;
     void seq_keep(llama_seq_id seq_id)                                                          override;
     void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) override;
