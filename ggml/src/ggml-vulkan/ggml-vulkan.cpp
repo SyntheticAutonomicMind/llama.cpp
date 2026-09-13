@@ -20,6 +20,7 @@ DispatchLoaderDynamic & ggml_vk_default_dispatcher();
 #define VULKAN_HPP_DEFAULT_DISPATCHER ggml_vk_default_dispatcher()
 
 #include <vulkan/vulkan.hpp>
+#include "host-ram.h"  // common::host_available_ram_query()
 
 // Fallback definitions for VK_NV_cooperative_matrix_decode_vector in case the
 // installed Vulkan headers predate the extension.
@@ -900,6 +901,9 @@ struct vk_device_struct {
     bool vulkan_memory_model;
 
     bool add_rms_fusion;
+    bool fa_no_scratch_transpose;       // GGML_VK_NO_FA_SCRATCH_TRANSPOSE
+    bool fa_scratch_force;                // GGML_VK_FA_SCRATCH_FORCE
+    uint32_t fa_scratch_safety_bytes;   // extra headroom reserved on UMA
     uint32_t partials_binding_alignment;
     uint32_t max_nodes_per_submit;
     uint64_t max_bytes_per_submit;
@@ -4130,7 +4134,38 @@ static vk_fa_tuning_params get_fa_tuning_params_coopmat1(const vk_device& device
     result.block_cols = coopmat_block_cols * num_subgroups;
     result.row_split = num_subgroups;
     result.subgroup_size = device->subgroup_size;
+
+    // CachyLLama: pin a 32-wide subgroup for coopmat1 FA where narrowing is free.
+    // The shader derives cols_per_iter, threads_per_rowgroup and every strided load loop
+    // from gl_WorkGroupSize.x, and workgroup_size = num_subgroups * subgroup_size,
+    // so threads_per_rowgroup always equals the real subgroup size. Halving the
+    // subgroup halves the workgroup, and the per-lane O state grows as
+    // d_per_thread = ceil((HSV/4) / threads_per_rowgroup). Pin only when that count
+    // is unchanged. On a 64-wide device it reduces exactly to hsv <= 128.
+    // =1 applies the rule; =2 forces the pin regardless of head size, for measuring
+    // the configurations the rule rejects. Diagnostic only.
+    static const int fa_wave32 = [] {
+        const char * e = getenv("GGML_VK_FA_WAVE32");
+        return e ? atoi(e) : 0;
+    }();
+    if (fa_wave32 != 0 &&
+        device->subgroup_size_control &&
+        32 < device->subgroup_size &&                              // narrow only, never widen
+        device->subgroup_min_size <= 32 && 32 <= device->subgroup_max_size &&
+        (result.block_cols % 32) == 0 &&                           // cols_per_thread stays >= 1
+        (result.block_cols * result.block_rows / 4) >= num_subgroups * 32 &&  // mask_cache != 0
+        (fa_wave32 == 2 ||
+         CEIL_DIV(hsv / 4, 32u) == CEIL_DIV(hsv / 4, device->subgroup_size))) {
+        result.subgroup_size = 32;
+    }
+
     result.workgroup_size = num_subgroups * result.subgroup_size;
+
+    // threads_per_rowgroup == the real subgroup size is load-bearing in three places:
+    // the subgroupMax row reduction, the subgroupAdd of Lf, and tmpsh[gl_SubgroupID], which is
+    // sized by row_split and would be written out of bounds if gl_NumSubgroups exceeded it.
+    GGML_ASSERT(result.workgroup_size == result.row_split * result.subgroup_size);
+    GGML_ASSERT(result.block_cols % result.subgroup_size == 0);
 
     const uint32_t D_lsb = D ^ (D & (D-1));  // extract lowest set bit
     result.d_split = std::min(std::min(result.subgroup_size, 8u), D_lsb / 4);
@@ -5788,7 +5823,17 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     ggml_vk_create_pipeline(device, device->pipeline_dequant[GGML_TYPE_Q5_0], "dequant_q5_0", dequant_q5_0_len, dequant_q5_0_data, "main", 2, 5 * sizeof(uint32_t), {256 * 16, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_dequant[GGML_TYPE_Q5_1], "dequant_q5_1", dequant_q5_1_len, dequant_q5_1_data, "main", 2, 5 * sizeof(uint32_t), {256 * 16, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_dequant[GGML_TYPE_Q8_0], "dequant_q8_0", dequant_q8_0_len, dequant_q8_0_data, "main", 2, 5 * sizeof(uint32_t), {256 * 16, 1, 1}, {}, 1);
+    // Fused dequant+transpose for FA quant-KV scratch.
+    // CachyLLama: extended from q8_0-only to q4_0, q4_1, q5_0, q5_1 — all are
+    // bit-exact equal to the native FA f16 path once dequant-once is engaged,
+    // and land the same 2.64x prefill win on Strix Halo that q8_0 gets.
+    ggml_vk_create_pipeline(device, device->pipeline_dequant_transpose[GGML_TYPE_Q4_0], "dequant_q4_0_transpose", dequant_q4_0_transpose_len, dequant_q4_0_transpose_data, "main", 2, 5 * sizeof(uint32_t), {256 * 16, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_dequant_transpose[GGML_TYPE_Q4_1], "dequant_q4_1_transpose", dequant_q4_1_transpose_len, dequant_q4_1_transpose_data, "main", 2, 5 * sizeof(uint32_t), {256 * 16, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_dequant_transpose[GGML_TYPE_Q5_0], "dequant_q5_0_transpose", dequant_q5_0_transpose_len, dequant_q5_0_transpose_data, "main", 2, 5 * sizeof(uint32_t), {256 * 16, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_dequant_transpose[GGML_TYPE_Q5_1], "dequant_q5_1_transpose", dequant_q5_1_transpose_len, dequant_q5_1_transpose_data, "main", 2, 5 * sizeof(uint32_t), {256 * 16, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_dequant_transpose[GGML_TYPE_Q8_0], "dequant_q8_0_transpose", dequant_q8_0_transpose_len, dequant_q8_0_transpose_data, "main", 2, 5 * sizeof(uint32_t), {256 * 16, 1, 1}, {}, 1);
+    // Strided-copy counterpart for FA f16 KV (contiguize pass). GGML_VK_FA_KV_CONTIG gates it.
+    ggml_vk_create_pipeline(device, device->pipeline_dequant_transpose[GGML_TYPE_F16], "dequant_f16_transpose", dequant_f16_transpose_len, dequant_f16_transpose_data, "main", 2, 5 * sizeof(uint32_t), {256 * 8, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_dequant[GGML_TYPE_Q2_K], "dequant_q2_k", dequant_q2_k_len, dequant_q2_k_data, "main", 2, 5 * sizeof(uint32_t), {256 * 64, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_dequant[GGML_TYPE_Q3_K], "dequant_q3_k", dequant_q3_k_len, dequant_q3_k_data, "main", 2, 5 * sizeof(uint32_t), {256 * 64, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_dequant[GGML_TYPE_Q4_K], "dequant_q4_k", dequant_q4_k_len, dequant_q4_k_data, "main", 2, 5 * sizeof(uint32_t), {256 * 32, 1, 1}, {}, 1);
@@ -6949,6 +6994,11 @@ static vk_device ggml_vk_get_device(size_t idx) {
         if (GGML_VK_MAX_MB_PER_SUBMIT != nullptr) {
             device->max_bytes_per_submit = std::stoull(GGML_VK_MAX_MB_PER_SUBMIT) * 1024 * 1024;
         }
+
+        device->fa_no_scratch_transpose = getenv("GGML_VK_NO_FA_SCRATCH_TRANSPOSE") != nullptr;
+        device->fa_scratch_force = getenv("GGML_VK_FA_SCRATCH_FORCE") != nullptr;
+        // On UMA the GPU scratch allocation eats into host RAM; reserve 1 GiB safety.
+        device->fa_scratch_safety_bytes = device->uma ? 1024 * 1024 * 1024 : 0;
 
         const bool force_disable_f16 = getenv("GGML_VK_DISABLE_F16") != nullptr;
 
@@ -11273,6 +11323,27 @@ static bool ggml_vk_flash_attn_scalar_shmem_support(const vk_device& device, con
     return supported;
 }
 
+// Single source of truth for native FA K/V types. Anything outside this list is only correct
+// through the dequant-once scratch path, so supports_op and the dispatch-time dequant gate
+// must agree on when that path runs. iq4_nl is native since upstream 8161641.
+static bool ggml_vk_fa_kv_native(ggml_type t, bool coopmat2) {
+    GGML_UNUSED(coopmat2);
+    switch (t) {
+    case GGML_TYPE_F32:
+    case GGML_TYPE_F16:
+    case GGML_TYPE_BF16:
+    case GGML_TYPE_Q4_0:
+    case GGML_TYPE_Q4_1:
+    case GGML_TYPE_Q5_0:
+    case GGML_TYPE_Q5_1:
+    case GGML_TYPE_Q8_0:
+    case GGML_TYPE_IQ4_NL:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool ggml_vk_flash_attn_coopmat_shmem_support(const vk_device& device, const vk_fa_tuning_params& params, uint32_t hsk, uint32_t hsv, bool f32acc, ggml_type k_type, ggml_type v_type) {
     GGML_UNUSED(v_type);
     // Needs to be kept up to date on shader changes
@@ -11297,7 +11368,9 @@ static bool ggml_vk_flash_attn_coopmat_shmem_support(const vk_device& device, co
     const uint32_t Qf = Br * qstride * f16vec4;
 
     const uint32_t psh_stride = Br / 4 + 2;
-    const uint32_t Psh = Bc * psh_stride * f16vec4;
+    // CachyLLama: Psh is now [Br][psh_stride] (query-major) instead of [Bc][psh_stride]
+    // (KV-major), matching the shader's coopMatLoad RowMajor requirement.
+    const uint32_t Psh = Br * psh_stride * f16vec4;
 
     const uint32_t sfshstride = (hsk <= 128) ? (Br + 8) : Br;
     const uint32_t sfsh = Bc * sfshstride * acctype;
@@ -11389,7 +11462,19 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
     };
     const bool k_quant = k->type != GGML_TYPE_F16 && k->type != GGML_TYPE_BF16 && k->type != GGML_TYPE_F32;
     const bool v_quant = v->type != GGML_TYPE_F16 && v->type != GGML_TYPE_BF16 && v->type != GGML_TYPE_F32;
-    const bool use_dequant_kv = k_quant && v_quant && neq1 >= 64 &&
+    // CachyLLama: contiguize strided f16 KV for FA prefill. KV-cache view has head-interleaved
+    // rows ([HS, NH, KV] physically) and cm1 direct-from-global coopMatLoads run ~2-5x slower
+    // on those strided rows than per-head-contiguous K/V. dequant_f16_transpose.comp is a pure
+    // strided copy, engaged only when rows are actually strided, prefill only (N >= 64).
+    static const char * fa_kv_contig_env = getenv("GGML_VK_FA_KV_CONTIG");
+    const bool fa_kv_contig = !(fa_kv_contig_env && fa_kv_contig_env[0] == '0');
+    const bool kv_f16_strided = k->type == GGML_TYPE_F16 && v->type == GGML_TYPE_F16 &&
+                                neq1 >= 64 &&
+                                (k->nb[1] != (uint64_t)HSK * sizeof(ggml_fp16_t) ||
+                                 v->nb[1] != (uint64_t)HSV * sizeof(ggml_fp16_t)) &&
+                                (HSK % 8) == 0 && (HSV % 8) == 0;
+    bool use_dequant_kv = !ctx->device->fa_no_scratch_transpose &&
+                          ((k_quant && v_quant) || (fa_kv_contig && kv_f16_strided)) && neq1 >= 64 &&
                                 is_dense_kv_cache(k) && is_dense_kv_cache(v) &&
                                 (uint64_t)ggml_nelements(k) * sizeof(ggml_fp16_t) <= ctx->device->properties.limits.maxStorageBufferRange &&
                                 (uint64_t)ggml_nelements(v) * sizeof(ggml_fp16_t) <= ctx->device->properties.limits.maxStorageBufferRange &&
@@ -11400,6 +11485,44 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
                                 // Intel Xe1 regresses, see PR 25494
                                 (ctx->device->vendor_id != VK_VENDOR_ID_INTEL ||
                                  (ctx->device->coopmat_support && ctx->device->architecture != vk_device_architecture::INTEL_XE1));
+    if (use_dequant_kv && !ctx->device->fa_scratch_force) {
+        // CachyLLama: gate FA scratch allocation on host RAM on UMA.
+        const uint64_t k_f16_sz = (uint64_t)ggml_nelements(k) * sizeof(ggml_fp16_t);
+        const uint64_t v_f16_sz = (uint64_t)ggml_nelements(v) * sizeof(ggml_fp16_t);
+        const uint64_t required = k_f16_sz + v_f16_sz + ctx->device->fa_scratch_safety_bytes;
+
+        std::size_t avail_ram = 0;
+        bool known = common::host_available_ram_query(&avail_ram);
+
+        if (!known) {
+            static std::atomic<bool> warned_unknown{false};
+            if (!warned_unknown.exchange(true)) {
+                GGML_LOG_WARN("ggml_vulkan: FA quant-KV scratch gate: cannot query host RAM on this platform; "
+                              "using slow path. Set GGML_VK_FA_SCRATCH_FORCE=1 to override, "
+                              "or GGML_VK_NO_FA_SCRATCH_TRANSPOSE=1 to silence.\n");
+            }
+            use_dequant_kv = false;
+        } else {
+            // On UMA hardware (Strix Halo, Apple Silicon, AMD APU, Intel
+            // integrated) the GPU memory pool IS host RAM. MemAvailable
+            // counts the reclaimable page cache, but reclaiming it hurts
+            // SSD read-ahead and other system services. Reserve a 30%
+            // headroom so the kernel doesn't thrash cache to satisfy
+            // a scratch allocation on the GPU side.
+            if (ctx->device->uma) {
+                avail_ram = (avail_ram * 7) / 10;
+            }
+            if (required > avail_ram) {
+                static std::atomic<bool> warned{false};
+                if (!warned.exchange(true)) {
+                    GGML_LOG_WARN("ggml_vulkan: FA quant-KV dequant scratch (%llu MiB incl. %llu MiB safety) exceeds host RAM; using slow path. Set GGML_VK_NO_FA_SCRATCH_TRANSPOSE=1 to silence this check.\n",
+                                  (unsigned long long) (required / (1024ULL * 1024ULL)),
+                                  (unsigned long long) (ctx->device->fa_scratch_safety_bytes / (1024ULL * 1024ULL)));
+                }
+                use_dequant_kv = false;
+            }
+        }
+    }
     const ggml_type k_type_eff = use_dequant_kv ? GGML_TYPE_F16 : k->type;
     const ggml_type v_type_eff = use_dequant_kv ? GGML_TYPE_F16 : v->type;
 
@@ -19530,20 +19653,8 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                     return false;
                 }
                 auto fa_kv_ok = [](ggml_type t) {
-                    switch (t) {
-                    case GGML_TYPE_F32:
-                    case GGML_TYPE_F16:
-                    case GGML_TYPE_BF16:
-                    case GGML_TYPE_Q8_0:
-                    case GGML_TYPE_Q5_1:
-                    case GGML_TYPE_Q5_0:
-                    case GGML_TYPE_Q4_1:
-                    case GGML_TYPE_Q4_0:
-                    case GGML_TYPE_IQ4_NL:
-                        return true;
-                    default:
-                        return false;
-                    }
+                    // CachyLLama: use extracted helper - single source of truth for native FA K/V types
+                    return ggml_vk_fa_kv_native(t, false);
                 };
                 if (!fa_kv_ok(op->src[1]->type) || !fa_kv_ok(op->src[2]->type)) {
                     return false;
