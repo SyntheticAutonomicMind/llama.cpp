@@ -11367,9 +11367,10 @@ static bool ggml_vk_flash_attn_coopmat_shmem_support(const vk_device& device, co
     const uint32_t qstride = hsk_pad / 4 + 2;
     const uint32_t Qf = Br * qstride * f16vec4;
 
-    const uint32_t psh_stride = Br / 4 + 2;
-    // CachyLLama: Psh is now [Br][psh_stride] (query-major) instead of [Bc][psh_stride]
-    // (KV-major), matching the shader's coopMatLoad RowMajor requirement.
+    // Stride must cover the column dimension (Bc/4 + 2 for row-major layout).
+    // The old code used Br/4 + 2 which was too small for Bc > Br + 12,
+    // causing shared memory corruption in the cm1 FA shader.
+    const uint32_t psh_stride = Bc / 4 + 2;
     const uint32_t Psh = Br * psh_stride * f16vec4;
 
     const uint32_t sfshstride = (hsk <= 128) ? (Br + 8) : Br;

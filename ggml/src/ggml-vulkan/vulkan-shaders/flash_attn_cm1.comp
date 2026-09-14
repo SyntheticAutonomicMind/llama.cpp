@@ -44,10 +44,13 @@ shared float tmpsh[row_split];
 const uint32_t qstride = HSK_pad / 4 + 2;
 shared FLOAT_TYPEV4 Qf[Br * qstride];
 
-const uint psh_stride = Br / 4 + 2;
-// CachyLLama: P is stored query-major with KV contiguous so the GEMM2 UseA load can be RowMajor.
-// RADV flips the requested layout for UseA, and only the resulting internal column-major case gets
-// an alignment hint, which is what lets the 16-element loads vectorize.
+// P is stored query-major (row = Br, col = Bc/4 vec4s). The stride must cover
+// the column dimension (ceil(Bc/4) + padding), not the row dimension.
+// Using Br/4 as the stride was a bug: with Br=16 and Bc=64 the stride was 6
+// but the max column index was Bc/4-1 = 15, so writes reached row 15 * 6 + 15 = 105
+// into a buffer of only 16 * 6 = 96 elements - 9 words out of bounds, corrupting
+// shared memory and producing garbage attention output.
+const uint psh_stride = Bc / 4 + 2;
 shared FLOAT_TYPEV4 Psh[Br * psh_stride];
 
 // Avoid padding for hsk==256 to make it fit in 48KB shmem.
