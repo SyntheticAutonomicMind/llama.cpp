@@ -323,19 +323,22 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
         inpL = cur;
     }
 
+   // expose the post-final-layer hidden state (before the final output
+    // norm) as t_h_nextn, so DFlash/EAGLE3 draft models can read it via
+    // llama_get_embeddings_nextn().  target_layer_ids that include
+    // n_layer_tgt expect this buffer; without it the emb_nextn output
+    // is never populated and the draft encoder receives stale data.
+    //
+    // t_h_nextn keeps all token rows (matching the unmasked emb_nextn
+    // buffer size).  The inp_out_ids crop is deferred to the logits path
+    // below so t_h_nextn is never smaller than ubatch.n_tokens.
+    res->t_h_nextn = inpL;
+
     cur = inpL;
-
-    // pre-final-norm residual stream: the DFlash drafter's last capture point
-    // ("input of layer n_layer" in the training convention)
-    cb(cur, "h_nextn", -1);
-    res->t_h_nextn = cur;
-
-    cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
-
     if (!cparams.embeddings_nextn_masked && inp_out_ids) {
         cur = ggml_get_rows(ctx0, cur, inp_out_ids);
     }
-
+    cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 

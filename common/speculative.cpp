@@ -1066,8 +1066,18 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         }
 
         // turn on extraction of the target layers' input embeddings
+        const uint32_t n_layer_tgt = (uint32_t) llama_model_n_layer(model_tgt);
         for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
-            llama_set_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k], true);
+            if (target_layer_ids[k] < n_layer_tgt) {
+                llama_set_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k], true);
+            } else if (target_layer_ids[k] == n_layer_tgt) {
+                // Last target layer's input == post-final-layer hidden state, exposed
+                // as the "nextn" buffer (same convention EAGLE3 uses).
+                llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
+            } else {
+                GGML_ABORT("DFlash: target layer id %d exceeds target n_layer %d",
+                        target_layer_ids[k], n_layer_tgt);
+            }
         }
 
         // DFlash2 reads its selector lattice from h_nextn and never consumes raw logits.
@@ -1166,8 +1176,16 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 // gather target features per extract layer; the fused decode encodes and
                 // injects them into the K/V cache at the target positions
                 batch_inject.n_tokens = n_chunk;
+                // target_layer_ids may include n_layer_tgt (the post-final-layer
+                // hidden state), which lives in the embeddings_nextn buffer rather
+                // than the per-layer embeddings_layer_inp buffers.
+                const uint32_t n_layer_tgt_l = (uint32_t) llama_model_n_layer(llama_get_model(ctx_tgt));
                 for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
-                    const float * layer = llama_get_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k]);
+                    // target_layer_ids may include n_layer_tgt (the post-final-layer
+                    // hidden state), which lives in the embeddings_nextn buffer.
+                    const float * layer = target_layer_ids[k] < n_layer_tgt_l
+                        ? llama_get_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k])
+                        : llama_get_embeddings_nextn(ctx_tgt);
                     if (!layer) {
                         GGML_ABORT("DFlash: target layer %d input not extracted.", target_layer_ids[k]);
                     }
