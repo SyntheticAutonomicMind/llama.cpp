@@ -1374,6 +1374,9 @@ struct llama_model_dflash : public llama_model_base {
     };
 
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
+
+    bool decoder_laguna = false;
+    ggml_tensor * aux_norm = nullptr;
 };
 
 

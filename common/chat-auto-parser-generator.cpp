@@ -360,7 +360,29 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
     auto &       p           = ctx.p;
     const auto & inputs      = ctx.inputs;
 
-    auto until_suffix = p.rule("until-suffix", p.until(arguments.value_suffix));
+    // Guard: include the next arg's name_prefix and value_prefix as delimiters.
+    // Without this, until() greedily consumes a missing closing value_suffix
+    // into the next arg's name_prefix — e.g. for the laguna template
+    // (name_prefix=, value_suffix=) when the model emits
+    // tool_name<arg_key>operation</arg_key><value>read<arg_key>path</arg_key><value>.
+    // the parser captures "read<arg_key>path</arg_key><value>." as the value
+    // of `operation` because until() never stops at the nested <arg_key>.
+    // Using until_one_of with value_suffix + name_prefix + value_prefix
+    // means the scanner stops at the first matching delimiter, so a
+    // missing closing  is caught as a parse failure instead of being
+    // silently accepted as corrupt arguments.
+    std::vector<std::string> value_boundaries;
+    value_boundaries.push_back(arguments.value_suffix);
+    if (!arguments.name_prefix.empty())  value_boundaries.push_back(arguments.name_prefix);
+    if (!arguments.value_prefix.empty() && arguments.value_prefix != arguments.value_suffix)
+        value_boundaries.push_back(arguments.value_prefix);
+    std::vector<std::string> unique_boundaries;
+    for (const auto & b : value_boundaries) {
+        if (std::find(unique_boundaries.begin(), unique_boundaries.end(), b) == unique_boundaries.end())
+            unique_boundaries.push_back(b);
+    }
+
+    auto until_suffix = p.rule("until-suffix", p.until_one_of(unique_boundaries));
 
     common_peg_parser tool_choice = p.choice();
 

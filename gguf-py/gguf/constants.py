@@ -135,6 +135,7 @@ class Keys:
         LOGIT_SCALE                       = "{arch}.logit_scale"
         DECODER_START_TOKEN_ID            = "{arch}.decoder_start_token_id"
         DECODER_BLOCK_COUNT               = "{arch}.decoder_block_count"
+        DECODER_ARCH                      = "{arch}.decoder_arch"
         ATTN_LOGIT_SOFTCAPPING            = "{arch}.attn_logit_softcapping"
         ROUTER_LOGIT_SOFTCAPPING          = "{arch}.router_logit_softcapping"
         FINAL_LOGIT_SOFTCAPPING           = "{arch}.final_logit_softcapping"

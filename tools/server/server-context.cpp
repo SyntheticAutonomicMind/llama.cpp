@@ -3436,12 +3436,18 @@ private:
                     //       the tokens added to the batch below
                     slot.print_timings_pp();
 
-                    // truncate any tokens that are beyond n_past for this slot
+                    // truncate any tokens that are beyond n_past for this slot.
+                    // use seq_rm_attn_only for hybrid/recurrent memory types: the
+                    // standard seq_rm routes through mem_recr->seq_rm whose
+                    // n_rs_seq rollback path can fail when the checkpoint's
+                    // position range extends past n_past. seq_rm_attn_only
+                    // clears attention cells AND stale position tracking in
+                    // the recurrent cache without touching R/S tensor data.
                     const llama_pos p0 = slot.prompt.tokens.pos_next();
 
-                    SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
+                    SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm_attn_only [%d, end)\n", slot.prompt.n_tokens(), p0);
 
-                    slot.mem.seq_rm(slot.id, p0, -1);
+                    slot.mem.seq_rm_attn_only(slot.id, p0, -1);
 
                     // If using an alora, there may be uncached tokens that come
                     // before the invocation sequence. When this happens, the

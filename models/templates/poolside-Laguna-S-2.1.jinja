@@ -1,7 +1,7 @@
 {#- Iteration on laguna_glm_thinking_v8/chat_template.jinja -#}
 {#- No formatting instructions -#}
 {{- "〈|EOS|〉" -}}
-{%- set enable_thinking = enable_thinking | default(true) -%}
+{%- set enable_thinking = enable_thinking | default(false) -%}
 {%- set add_generation_prompt = add_generation_prompt | default(false) -%}
 {%- set preserve_thinking = preserve_thinking | default(false) -%}
 

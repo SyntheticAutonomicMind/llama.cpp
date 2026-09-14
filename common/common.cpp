@@ -1624,9 +1624,20 @@ done:
 
 static void common_context_seq_rm(llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     auto * mem = llama_get_memory(ctx);
+    if (!mem) {
+        return;
+    }
     if (!llama_memory_seq_rm(mem, seq_id, p0, p1)) {
         GGML_ABORT("%s", string_format("failed to remove sequence %d with p0=%d, p1=%d\n", seq_id, p0, p1).c_str());
     }
+}
+
+static bool common_context_seq_rm_attn_only(llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    auto * mem = llama_get_memory(ctx);
+    if (!mem) {
+        return true;
+    }
+    return llama_memory_seq_rm_attn_only(mem, seq_id, p0, p1);
 }
 
 static void common_context_seq_cp(llama_context * ctx, llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
@@ -1648,6 +1659,15 @@ void common_memory::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) cons
     common_context_seq_rm(ctx_tgt, seq_id, p0, p1);
     if (ctx_dft) {
         common_context_seq_rm(ctx_dft, seq_id, p0, p1);
+    }
+}
+
+void common_memory::seq_rm_attn_only(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    if (!common_context_seq_rm_attn_only(ctx_tgt, seq_id, p0, p1)) {
+        GGML_ABORT("%s", string_format("failed to remove sequence %d with p0=%d, p1=%d (attn only)\n", seq_id, p0, p1).c_str());
+    }
+    if (ctx_dft) {
+        common_context_seq_rm_attn_only(ctx_dft, seq_id, p0, p1);
     }
 }
 
