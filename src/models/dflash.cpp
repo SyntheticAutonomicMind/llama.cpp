@@ -238,6 +238,25 @@ void llama_model_dflash::load_arch_tensors(llama_model_loader &) {
         layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), { n_embd_head_k }, 0);
         layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), { n_embd_head_k }, 0);
 
+        // Optional attention output gate (Laguna drafters). Per-head or
+        // per-element, distinguished by the stored width, same as the Laguna
+        // target arch. Absent on generic DFlash drafters.
+        if (decoder_laguna) {
+            const ggml_tensor * gate_meta = ml->get_tensor_meta(
+                tn(LLM_TENSOR_ATTN_GATE, "weight", i).str().c_str());
+            if (gate_meta != nullptr) {
+                const int64_t n_gate_out = gate_meta->ne[1];
+                if (n_gate_out != n_head && n_gate_out != n_embd_head_k * n_head) {
+                    GGML_ABORT("DFlash: unexpected attention gate width %lld at layer %d "
+                            "(expected %lld per-head or %lld per-element)",
+                            (long long) n_gate_out, i, (long long) n_head,
+                            (long long) (n_embd_head_k * n_head));
+                }
+                layer.wqkv_gate = create_tensor(tn(LLM_TENSOR_ATTN_GATE, "weight", i),
+                        { n_embd, n_gate_out }, 0);
+            }
+        }
+
         // optional per-head attention sinks (e.g. Nemotron DSpark)
         layer.attn_sinks = create_tensor(tn(LLM_TENSOR_ATTN_SINKS, "weight", i), { n_head }, TENSOR_NOT_REQUIRED);
 
@@ -651,6 +670,22 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
         res->add_input(std::move(inp));
 
         // fuse the target features through the encoder
+        // Laguna drafters RMS-norm each captured target feature before concat + fc.
+        // View the concatenated input as [n_feat, n_aux, n_tokens], norm over
+        // n_feat, and multiply by the stacked per-aux weights [n_feat, n_aux].
+        if (model_df.aux_norm != nullptr) {
+            const int64_t n_aux  = model_df.aux_norm->ne[1];
+            const int64_t n_feat = hparams.n_embd_inp_enc() / n_aux;
+
+            ggml_tensor * cur_a = ggml_reshape_3d(ctx0, inp_target, n_feat, n_aux, n_tokens);
+            cur_a = ggml_rms_norm(ctx0, cur_a, hparams.f_norm_rms_eps);
+            cur_a = ggml_mul(ctx0, cur_a, model_df.aux_norm);
+            cur_a = ggml_reshape_2d(ctx0, cur_a, n_feat * n_aux, n_tokens);
+            cb(cur_a, "enc_aux_norm", -1);
+
+            inp_target = cur_a;
+        }
+
         ggml_tensor * inp_g = build_lora_mm(model.fc, inp_target, model.fc_s);
         inp_g = build_norm(inp_g, model.output_norm_enc, NULL, LLM_NORM_RMS, -1);
         cb(inp_g, "inp_g_embeddings", -1);
@@ -772,13 +807,8 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
         ggml_tensor * wo    = gated ? NULL : layer.wo;
 
         ggml_tensor * cur = use_iswa
-            ? build_attn(inp_attn_iswa, wo,      NULL, gated ? NULL : layer.wo_s, Qcur, Kcur, Vcur, nullptr, layer.attn_sinks, nullptr, kq_scale, il)
-            : build_attn(inp_attn,      wo,      NULL, gated ? NULL : layer.wo_s, Qcur, Kcur, Vcur, nullptr, layer.attn_sinks, nullptr, kq_scale, il);
-
-        if (attn_dynamic) {
-            cur = build_dflash2_conv(*this, cur, attn_dynamic, layer.dflash_attn_conv_base, 1);
-            cb(cur, "attn_conv_out", il);
-        }
+            ? build_attn(inp_attn_iswa, wo,      NULL, layer.wo_s, Qcur, Kcur, Vcur, nullptr, layer.attn_sinks, nullptr, kq_scale, il)
+            : build_attn(inp_attn,      wo,      NULL, layer.wo_s, Qcur, Kcur, Vcur, nullptr, layer.attn_sinks, nullptr, kq_scale, il);
 
         if (gated) {
             // Softplus output gate on the pre-attention hidden state, per-head
@@ -830,6 +860,11 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
 
         cur = ggml_add(ctx0, cur, ffn_inp);
         cb(cur, "l_out", il);
+
+        if (attn_dynamic) {
+            cur = build_dflash2_conv(*this, cur, attn_dynamic, layer.dflash_attn_conv_base, 1);
+            cb(cur, "attn_conv_out", il);
+        }
 
         inpL = cur;
     }
