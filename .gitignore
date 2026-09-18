@@ -153,3 +153,7 @@ a.out.*
 
 AGENTS.local.md
 .pi/SYSTEM.md
+
+# CLIO (managed automatically)
+.clio/*
+!.clio/instructions.md
