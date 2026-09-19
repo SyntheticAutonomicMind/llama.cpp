@@ -7242,6 +7242,24 @@ static void test_reasoning_effort_caps() {
     assert_supports_effort("models/templates/Qwen-Qwen3-0.6B.jinja", false);
 }
 
+static void test_qwen_string_enums() {
+    // When a Qwen-format tool parameter has type "string" and an "enum" of
+    // string values, the generated grammar should only accept those enum
+    // literals, not arbitrary strings.
+    for (const std::string path : {"models/templates/Qwen3-Coder.jinja"}) {
+        auto tmpls = read_templates(path);
+        common_chat_templates_inputs in;
+        in.messages = {message_user};
+        in.tools = {{"records", "Access records.", R"({"type":"object","properties":{"action":{"type":"string","enum":["load","reload","re"]}},"required":["action"],"additionalProperties":false})"}};
+        auto params = common_chat_templates_apply(tmpls.get(), in);
+        auto grammar = build_grammar(params.grammar);
+        assert_equals(true, grammar != nullptr);
+
+        // The grammar should contain the enum values as choices, not a generic string rule.
+        assert_equals(false, params.grammar.find("\"load\" | \"reload\" | \"re\"") == std::string::npos);
+    }
+}
+
 static void test_msg_diffs_compute() {
     LOG_DBG("%s\n", __func__);
     {
@@ -7392,6 +7410,7 @@ int main(int argc, char ** argv) {
     } else
 #endif
     {
+        test_qwen_string_enums();
         test_msg_diffs_compute();
         test_msgs_oaicompat_json_conversion();
         test_msg_token_delimiters_split();

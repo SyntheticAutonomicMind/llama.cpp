@@ -108,10 +108,31 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
                     auto types = param.schema->value_types();
 
                     auto arg_value = p.eps();
+                    bool arg_value_set = false;
                     if (!types.has(common_chat_schema::TYPE_STRING)) {
                         arg_value = p.tool_arg_json_value(p.schema(p.json(), rule_name + "-schema", doc, *param.schema)) + arg_close;
+                        arg_value_set = true;
                     } else if (types.is_only(common_chat_schema::TYPE_STRING)) {
-                        arg_value = arg_string;
+                        // If the schema restricts the string to an enum of string values,
+                        // constrain the grammar to only accept those enum literals.
+                        auto values = p.choice();
+                        if (param.schema->kind() == common_chat_schema::KIND_ENUM) {
+                            const auto & enum_node = static_cast<const common_chat_schema_enum &>(*param.schema);
+                            bool all_strings = true;
+                            for (const auto & v : enum_node.values) {
+                                if (!v.is_string()) { all_strings = false; break; }
+                            }
+                            if (all_strings && !enum_node.values.empty()) {
+                                for (const auto & v : enum_node.values) {
+                                    values |= p.literal(v.get<std::string>()) + p.peek(p.literal("\n</parameter>\n"));
+                                }
+                                arg_value = p.tool_arg_string_value(values) + arg_close;
+                                arg_value_set = true;
+                            }
+                        }
+                        if (!arg_value_set) {
+                            arg_value = arg_string;
+                        }
                     } else {
                         // The string alternative accepts any text, so the grammar only keeps the raw string
                         // rule. The parser still tries the JSON alternatives first to type the value.
