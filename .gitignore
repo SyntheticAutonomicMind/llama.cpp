@@ -157,3 +157,7 @@ AGENTS.local.md
 # CLIO (managed automatically)
 .clio/*
 !.clio/instructions.md
+reference/
+scratch/
+
+Testing/
