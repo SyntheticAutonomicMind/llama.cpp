@@ -315,7 +315,7 @@ uint32_t ggml_vk_concat_unit_size(ggml_type type) {
 // On by default to match the rest of the f16 KV / quant-KV opt-in pattern; =0 disables.
 static bool ggml_vk_concat_is_transposed(const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst) {
     static const char * env = getenv("GGML_VK_CONCAT_TRANSPOSE");
-    if (!(env && atoi(env) != 0)) {
+    if (env && atoi(env) == 0) {
         return false;
     }
     if (ggml_get_op_params_i32(dst, 0) != 0) {           // dim 0 only
@@ -1404,6 +1404,16 @@ vk_fa_tuning_params get_fa_tuning_params(const vk_device& device, uint32_t hsk, 
     if (n_rows == 1 && (path == FA_COOPMAT1 || path == FA_COOPMAT2)) {
         path = FA_SCALAR;
     }
+
+    const char * path_str =
+        path == FA_SCALAR ? "scalar" :
+        path == FA_COOPMAT1 ? "coopmat1" :
+        path == FA_COOPMAT2 ? "coopmat2" : "unknown";
+
+    GGML_LOG_INFO("ggml_vulkan: fa tuning: path=%s, hsk=%u, hsv=%u, n_rows=%u, n_kv=%u, k=%s, v=%s, acc=%s\n",
+                path_str, hsk, hsv, n_rows, n_kv,
+                ggml_type_name(k_type), ggml_type_name(v_type),
+                f32acc ? "f32" : "f16");
 
     switch (path) {
     case FA_SCALAR:
