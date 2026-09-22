@@ -864,6 +864,17 @@ static bool dsv4_compress_debug() {
     return debug;
 }
 
+static ggml_prec llama_matmul_acc_prec() {
+    static const ggml_prec prec = []() {
+        const char * env = getenv("LLAMA_ACC_PREC");
+        if (env && (strcmp(env, "f32") == 0 || strcmp(env, "F32") == 0)) {
+            return GGML_PREC_F32;
+        }
+        return GGML_PREC_DEFAULT;
+    }();
+    return prec;
+}
+
 static void dsv4_set_comp_inputs(
         const llm_graph_input_dsv4::comp_input & inp,
         const llama_kv_cache_dsv4_context::comp_plan & plan,
@@ -2636,7 +2647,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX);
         ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
-        ggml_prec_set_acc(cur, GGML_PREC_F32);
+        // F16 accumulator is safe for FA on modern GPUs (CUDA FA already uses F16 matmul).
+        // Override to F32 with LLAMA_ACC_PREC=f32 for models with numerical issues.
+        ggml_prec_set_acc(cur, llama_matmul_acc_prec());
 
         if (v_mla) {
 #if 0
@@ -2661,8 +2674,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cb(kq, "kq", il);
 
         // note: this op tends to require high floating point range
-        //       while for some models F16 is enough, for others it is not, so we default to F32 here
-        ggml_prec_set_acc(kq, GGML_PREC_F32);
+        //       while for some models F16 is enough, for others it is not
+        //       default is F16 accumulator; override to F32 with LLAMA_ACC_PREC=f32
+        ggml_prec_set_acc(kq, llama_matmul_acc_prec());
 
         if (arch == LLM_ARCH_GROK) {
             // need to do the following:
