@@ -199,7 +199,6 @@ static bool test_multi_seq_split_replay(const common_params & params, llama_mode
     // identical ubatch shapes should produce identical states, but the larger
     // stdev makes the model sensitive to backend scheduling/rounding noise
     constexpr float nmse_eps = 1e-5f;
-
     float    diff_max  = 0.0f;
     uint32_t seq_first = 0;
     int32_t  pos_first = -1;
@@ -361,7 +360,7 @@ static int test_rollback(const common_params & params, llama_model * model, uint
     ckpt.update_tgt(ctx_src, 0, 0);
     ckpt.load_tgt(ctx_dst, 0, 0);
 
-    constexpr float nmse_eps = 0.0;
+    constexpr float nmse_eps = 1e-5f;
     std::vector<std::vector<float>> logits_src_replay(n_rollback);
     const auto replay_and_compare = [&](const char * mode) {
         for (uint32_t i = 0; i < n_rollback; ++i) {

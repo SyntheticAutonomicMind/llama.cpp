@@ -2,6 +2,8 @@
 
 #include "ggml.h" // for ggml_log_level
 
+#include "ggml-backend.h"
+
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -94,6 +96,12 @@ struct buffer_view {
 };
 
 void replace_all(std::string & s, const std::string & search, const std::string & replace);
+
+// announce a direct host write to a tensor's data pointer (for the scheduler sanitizer)
+static inline void llama_host_write(struct ggml_tensor * t) {
+    GGML_ASSERT(ggml_backend_buffer_is_host(t->buffer));
+    ggml_backend_tensor_set_direct(t, 0, ggml_nbytes(t));
+}
 
 // TODO: rename to llama_format ?
 LLAMA_ATTRIBUTE_FORMAT(1, 2)
