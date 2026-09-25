@@ -7840,9 +7840,17 @@ bool ggml_vk_use_mul_mat_vec_id(const ggml_backend_vk_context * ctx, const struc
     // Vulkan (a few vkCmdDispatch calls).
     const float density = float(n_tokens * n_expert_used) / float(n_experts);
 
+    // density threshold for vec-vs-coopmat dispatch on AMD GCN.
+    // vec path is dispatched per-token (cheap but serialised).  coopmat
+    // path uses matrix cores but requires count_experts + row-list overhead
+    // and tiles tiles to 32 rows.  Benchmark on Strix Halo (gfx1151,
+    // Laguna 256 experts, top_k=10, Q4_K_XL) shows:
+    //   B=52 (density=2.03): vec 110.4 vs coopmat 108.4  (vec +1.8%)
+    //   B=64 (density=2.50): vec 114.4 vs coopmat 124.5  (coopmat +8.9%)
+    // Crossover is at density ~2.0, i.e. B=51 for Laguna.
     static const float density_threshold = []() {
         const char * env = getenv("GGML_VK_LAGUNA_MOE_DENSITY");
-        return env ? std::stof(env) : 3.0f;
+        return env ? std::stof(env) : 2.0f;
     }();
 
     const bool use_vec = density < density_threshold;
