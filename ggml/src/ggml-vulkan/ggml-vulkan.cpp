@@ -7812,11 +7812,63 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
     }
 }
 
-bool ggml_vk_use_mul_mat_vec_id(const struct ggml_cgraph * cgraph, int node_idx) {
-    ggml_tensor * dst = cgraph->nodes[node_idx];
+bool ggml_vk_use_mul_mat_vec_id(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx) {
+    ggml_tensor * dst  = cgraph->nodes[node_idx];
     ggml_tensor * src0 = dst->src[0];
     ggml_tensor * src2 = dst->src[2];
-    return (src2->ne[1] <= 8) && (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type));
+
+    // Preserve existing type check
+    if (!(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type))) {
+        return false;
+    }
+
+    const int64_t n_tokens      = src2->ne[1];
+    const int64_t n_expert_used = src2->ne[0];
+    const int64_t n_experts     = src0->ne[2];
+
+    // Non-MoE or single-expert: fall back to original simple threshold
+    if (n_experts <= 1) {
+        return n_tokens <= 8;
+    }
+
+    // Expert density: average (expert, token) rows per expert.
+    // For Laguna (256 experts, top_k=10): density = n_tokens * 10 / 256.
+    // Low density means each expert gets very few rows, making the coopmat
+    // path's tiles severely underutilized (tile rows >> real rows) and the
+    // count_experts/row-list overhead unamortized.  The vec path avoids
+    // both problems at the cost of per-token dispatch, which is cheap on
+    // Vulkan (a few vkCmdDispatch calls).
+    const float density = float(n_tokens * n_expert_used) / float(n_experts);
+
+    static const float density_threshold = []() {
+        const char * env = getenv("GGML_VK_LAGUNA_MOE_DENSITY");
+        return env ? std::stof(env) : 3.0f;
+    }();
+
+    const bool use_vec = density < density_threshold;
+
+    if (ctx && ctx->device) {
+        VK_LOG_DEBUG(
+            "ggml_vk_use_mul_mat_vec_id: gpu=" << ctx->device->name
+            << " arch=" << (int)ctx->device->architecture
+            << " subgroup=" << ctx->device->subgroup_size
+            << " n_tokens=" << n_tokens
+            << " n_expert_used=" << n_expert_used
+            << " n_experts=" << n_experts
+            << " density=" << density
+            << " threshold=" << density_threshold
+            << " -> " << (use_vec ? "vec" : "coopmat"));
+    } else {
+        VK_LOG_DEBUG(
+            "ggml_vk_use_mul_mat_vec_id: n_tokens=" << n_tokens
+            << " n_expert_used=" << n_expert_used
+            << " n_experts=" << n_experts
+            << " density=" << density
+            << " threshold=" << density_threshold
+            << " -> " << (use_vec ? "vec" : "coopmat"));
+    }
+
+    return use_vec;
 }
 
 void ggml_vk_mul_mat_id(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
@@ -7825,7 +7877,7 @@ void ggml_vk_mul_mat_id(ggml_backend_vk_context * ctx, vk_context& subctx, const
     ggml_tensor * src1 = dst->src[1];
     ggml_tensor * src2 = dst->src[2];
     VK_LOG_DEBUG("ggml_vk_mul_mat_id(" << src0 << ", " << src1 << ", " << src2 << ", " << dst << ")");
-    if (ggml_vk_use_mul_mat_vec_id(cgraph, node_idx)) {
+    if (ggml_vk_use_mul_mat_vec_id(ctx, cgraph, node_idx)) {
         ggml_vk_mul_mat_vec_id_q_f16(ctx, subctx, cgraph, node_idx);
     } else {
         ggml_vk_mul_mat_id_q_f16(ctx, subctx, src0, src1, src2, dst);
@@ -13624,7 +13676,7 @@ bool ggml_vk_can_fuse(const ggml_backend_vk_context * ctx, const struct ggml_cgr
             return false;
         }
         // mat-vec only
-        if (!ggml_vk_use_mul_mat_vec_id(cgraph, node_idx)) {
+        if (!ggml_vk_use_mul_mat_vec_id(ctx, cgraph, node_idx)) {
             return false;
         }
         // shaders assume the types match
@@ -13659,7 +13711,7 @@ bool ggml_vk_can_fuse(const ggml_backend_vk_context * ctx, const struct ggml_cgr
             return false;
         }
         // mat-vec only
-        if (!ggml_vk_use_mul_mat_vec_id(cgraph, node_idx)) {
+        if (!ggml_vk_use_mul_mat_vec_id(ctx, cgraph, node_idx)) {
             return false;
         }
         // shaders assume the types match
