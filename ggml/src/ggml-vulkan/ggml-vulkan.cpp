@@ -5944,7 +5944,14 @@ static void ggml_vk_matmul_id(
         "n_as: " << n_as << ", nei0: " << nei0 << ", nei1: " << nei1 << ", nbi1: " << nbi1 << ", ne11: " << ne11 << ")");
     const vk_mat_mat_id_push_constants pc = { m, n, k, stride_a, stride_b, stride_d, batch_stride_a, batch_stride_b, batch_stride_d,
                                               nei0, nei1, nbi1, ne11, n_as, uint32_t(hoist_row_ids) };
-    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, d, ids, expert_count_buf }, pc, { m, nei1, n_as });
+
+    // For MUL_MAT_ID, the K dimension is not split (start_k=0, end_k=p.K in the shader),
+    // so only ik=0 workgroups in the X dimension do useful work.  Dispatch only
+    // blocks_m (= ceil(m / BM)) workgroups in X instead of m, eliminating the
+    // (m / blocks_m - 1) redundant K-split workgroups that perform identical computation.
+    uint32_t bm = pipeline->wg_denoms[0];
+    uint32_t blocks_m = (m + bm - 1) / bm;
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, d, ids, expert_count_buf }, pc, { blocks_m, nei1, n_as });
 }
 
 bool ggml_vk_dim01_contiguous(const ggml_tensor * tensor) {

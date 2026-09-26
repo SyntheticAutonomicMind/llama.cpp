@@ -236,6 +236,12 @@ void main() {
     const uint ir = gl_WorkGroupID.x % blocks_m;
     const uint ik = gl_WorkGroupID.x / blocks_m;
 
+#ifdef MUL_MAT_ID
+    // MUL_MAT_ID processes the full K range (start_k=0, end_k=p.K);
+    // the K-split dimension (ik) is unused — only ik==0 does work.
+    if (ik > 0) return;
+#endif
+
     const uint WNITER = (WM * WN) / (WARP * TM * TN * WMITER);
     const uint WSUBM = WM / WMITER;
     const uint WSUBN = WN / WNITER;

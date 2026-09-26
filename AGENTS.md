@@ -36,6 +36,8 @@ cd build && ctest -L python --verbose
 pip install ./gguf-py
 ```
 
+**WARNING** llama-cli will break agentic sessions, do not use it. 
+
 ---
 
 ## Architecture
