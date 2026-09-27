@@ -1319,6 +1319,7 @@ static vk_fa_tuning_params get_fa_tuning_params_coopmat1(const vk_device& device
         return e ? atoi(e) : 0;
     }();
     if (fa_wave32 != 0 &&
+        n_rows >= 32 &&
         device->subgroup_size_control &&
         32 < device->subgroup_size &&                              // narrow only, never widen
         device->subgroup_min_size <= 32 && 32 <= device->subgroup_max_size &&
