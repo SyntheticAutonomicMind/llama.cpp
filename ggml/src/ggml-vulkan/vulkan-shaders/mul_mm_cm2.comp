@@ -83,6 +83,7 @@ layout (push_constant) uniform parameter
     uint ne11;
     uint n_experts;
     uint hoist_row_ids;
+    uint fusion_flags;
 #else
     uint base_work_group_z;
     uint num_batches;
@@ -183,6 +184,9 @@ f16vec4 mmDecodeA_v(const in decodeBufA bl_in, const in uint blockCoords[2], con
 #ifdef MUL_MAT_ID
 layout (binding = 3) readonly buffer IDS {int data_ids[];};
 layout (binding = 4) readonly buffer Counts {int data_expert_count[];};
+// Bound for descriptor-layout parity with the other mul_mat_id shaders. The fused MUL
+// epilogue is not implemented here, so the host never enables it on coopmat2 devices.
+layout (binding = 5) readonly buffer FusedScale {float data_fscale[];};
 
 shared u16vec4 row_ids[BN];
 
@@ -526,7 +530,7 @@ void main() {
 
             coopMatStoreTensorNV(mat_d, data_d, pos_d, sliceTensorLayoutNV(tensorLayoutD, ic * BN, BNover4, ir * BM, BM), tensorViewTranspose);
             return;
-        } else if (enable_smaller_matrices && ic * BN + BNover2 >= p.N) {
+        } else if (ic * BN + BNover2 >= p.N) {
             coopmat<ACC_TYPE, gl_ScopeWorkgroup, BM, BNover2, gl_MatrixUseAccumulator> sum = coopmat<ACC_TYPE, gl_ScopeWorkgroup, BM, BNover2, gl_MatrixUseAccumulator>(0.0);
             for (uint i = 0; i < k_iters; ++i) {
 
