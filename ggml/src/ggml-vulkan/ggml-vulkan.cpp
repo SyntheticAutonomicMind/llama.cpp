@@ -5944,13 +5944,7 @@ static void ggml_vk_matmul_id(
         "n_as: " << n_as << ", nei0: " << nei0 << ", nei1: " << nei1 << ", nbi1: " << nbi1 << ", ne11: " << ne11 << ")");
     const vk_mat_mat_id_push_constants pc = { m, n, k, stride_a, stride_b, stride_d, batch_stride_a, batch_stride_b, batch_stride_d,
                                               nei0, nei1, nbi1, ne11, n_as, uint32_t(hoist_row_ids) };
-    // MUL_MAT_ID processes the full K range in one pass (start_k=0, end_k=p.K),
-    // so the K-split dimension (ik) computed in the shader is always 0 for useful work.
-    // Only dispatch blocks_m (= ceil(m / BM)) workgroups in X instead of m,
-    // eliminating (m - blocks_m) redundant workgroups that perform identical computation.
-    uint32_t bm = pipeline->wg_denoms[0];
-    uint32_t blocks_m = (m + bm - 1) / bm;
-    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, d, ids, expert_count_buf }, pc, { blocks_m, nei1, n_as });
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { a, b, d, ids, expert_count_buf }, pc, { m, nei1, n_as });
 }
 
 bool ggml_vk_dim01_contiguous(const ggml_tensor * tensor) {
@@ -6734,11 +6728,10 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
 
     const uint32_t max_groups_x = ctx->device->properties.limits.maxComputeWorkGroupCount[0];
 
-    const uint32_t num_rows = dmmv->wg_denoms[0];
-    uint32_t groups_x = num_rows > 0 ? CEIL_DIV(ne01, num_rows) : ne01;
+    uint32_t groups_x = ne01;
     uint32_t groups_z = 1;
 
-    if (groups_x > max_groups_x) {
+    if (ne01 > max_groups_x) {
         groups_z = 64;
         groups_x = CEIL_DIV(groups_x, groups_z);
     }
@@ -7760,11 +7753,10 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
 
     const uint32_t max_groups_x = ctx->device->properties.limits.maxComputeWorkGroupCount[0];
 
-    const uint32_t num_rows = dmmv->wg_denoms[0];
-    uint32_t groups_x = num_rows > 0 ? CEIL_DIV(ne01, num_rows) : ne01;
+    uint32_t groups_x = ne01;
     uint32_t groups_z = 1;
 
-    if (groups_x > max_groups_x) {
+    if (ne01 > max_groups_x) {
         groups_z = 64;
         groups_x = CEIL_DIV(groups_x, groups_z);
     }
