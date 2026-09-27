@@ -2313,11 +2313,22 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
-    if (arch == LLM_ARCH_MISTRAL4) {
+    bool fuse_weight = false;
+    const bool can_fuse_down_weight =
+        !down_exps_b && !down_exps_s && !weight_before_ffn &&
+        !up_exps_s && !gate_exps_s && !gate_up_exps && !gate_exps &&
+        arch != LLM_ARCH_MISTRAL4;
+    if (can_fuse_down_weight) {
+        // Set weights as src[3] on the MUL_MAT_ID node.  The Vulkan backend
+        // will detect this and use a fused DOWN+weight kernel, avoiding
+        // the separate ggml_mul(experts, weights) node and its intermediate tensor.
+        experts->src[3] = weights;
+        fuse_weight = true;
+    } else if (arch == LLM_ARCH_MISTRAL4) {
         // src1 can exceed F16 range
         ggml_prec_set_src(experts, GGML_PREC_F32, 1);
     }
-    cb(experts, "ffn_moe_down", il);
+    cb(experts, fuse_weight ? "ffn_moe_down_fused" : "ffn_moe_down", il);
 
     if (down_exps_s) {
         cb(experts, "ffn_moe_down_scaled", il);
@@ -2328,7 +2339,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(experts, "ffn_moe_down_biased", il);
     }
 
-    if (!weight_before_ffn) {
+    if (!weight_before_ffn && !fuse_weight) {
         experts = ggml_mul(ctx0, experts, weights);
         cb(experts, "ffn_moe_weighted", il);
     }
