@@ -14927,6 +14927,12 @@ void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * graph, 
                     !(j == c+1 && c == current_set.back() && graph->nodes[c]->op == GGML_OP_MUL_MAT && graph->nodes[j]->op == GGML_OP_ADD) &&
                     !(j == c+1 && c == current_set.back() && graph->nodes[c]->op == GGML_OP_MUL_MAT_ID && graph->nodes[j]->op == GGML_OP_ADD_ID) &&
                     !(j == c+1 && c == current_set.back() && graph->nodes[c]->op == GGML_OP_MUL_MAT_ID && graph->nodes[j]->op == GGML_OP_MUL) &&
+                    // a matmul followed by its f16 cast (MUL_MAT(_ID)(+MUL)+CPY(f16) fusions): keep the cast behind the matmul,
+                    // otherwise the grab pulls the next independent matmul in between and the pair never fuses
+                    !(j == c+1 && c == current_set.back() && (graph->nodes[c]->op == GGML_OP_MUL_MAT || graph->nodes[c]->op == GGML_OP_MUL_MAT_ID) &&
+                      graph->nodes[j]->op == GGML_OP_CPY && graph->nodes[j]->type == GGML_TYPE_F16 && graph->nodes[j]->src[0] == graph->nodes[c]) &&
+                    !(j == c+1 && c == current_set.back() && j >= 2 && graph->nodes[c]->op == GGML_OP_MUL && graph->nodes[c-1]->op == GGML_OP_MUL_MAT_ID &&
+                      graph->nodes[j]->op == GGML_OP_CPY && graph->nodes[j]->type == GGML_TYPE_F16 && graph->nodes[j]->src[0] == graph->nodes[c]) &&
                     !(j == c+1 && c == current_set.back() && graph->nodes[c]->op == GGML_OP_ADD && graph->nodes[j]->op == GGML_OP_ADD) &&
                     !(j == c+1 && c == current_set.back() && graph->nodes[c]->op == GGML_OP_SSM_CONV && graph->nodes[j]->op == GGML_OP_ADD) &&
                     !(j == c+1 && c == current_set.back() && graph->nodes[c]->op == GGML_OP_SSM_CONV && graph->nodes[j]->op == GGML_OP_UNARY)) {
