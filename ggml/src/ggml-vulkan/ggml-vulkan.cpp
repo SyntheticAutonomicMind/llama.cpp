@@ -1927,6 +1927,21 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 pipeline->push_constant_size = push_constant_size;
                 pipeline->wg_denoms = wg_denoms;
                 pipeline->align = align;
+                // Regression gate: for mul_mat_vec dequant pipelines, wg_denoms[0]
+                // must equal the shader's NUM_ROWS specialization constant
+                // (constant_id = 1, i.e. specialization_constants[1]). The vec
+                // dispatch in ggml_vk_mul_mat_vec_q_f16 / ggml_vk_mul_mat_vec_id_q_f16
+                // relies on this lockstep to safely reduce groups_x to
+                // ceil(ne01 / wg_denoms[0]). p021 and nc shaders use a different
+                // dispatch model and are excluded.
+                if (specialization_constants.size() >= 2) {
+                    const std::string& pname = pipeline->name;
+                    if (pname.rfind("mul_mat_vec", 0) == 0 &&
+                        pname.find("p021") == std::string::npos &&
+                        pname.find("nc") == std::string::npos) {
+                        GGML_ASSERT(wg_denoms[0] == specialization_constants[1]);
+                    }
+                }
                 pipeline->initialized = true;
 #if defined(VK_EXT_shader_64bit_indexing)
                 pipeline->is_64b_indexing = (i == 1);
