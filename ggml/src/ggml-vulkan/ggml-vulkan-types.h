@@ -1211,6 +1211,13 @@ class vk_perf_logger {
         timings[name].push_back(time);
     }
 
+    // Log a sub-node interval under a caller-supplied name. Used for work a node's handler
+    // dispatches before the op itself (e.g. the FA K/V contiguize/dequant pass), which would
+    // otherwise be billed to the op and invisible. No flops: these move bytes, not math.
+    void log_timing_named(const char * name, uint64_t time) {
+        timings[std::string(name)].push_back(time);
+    }
+
     void log_timing(const std::vector<ggml_tensor *> &nodes, const std::vector<const char *> &names, uint64_t time) {
         uint64_t total_flops = 0;
         std::string name;
@@ -1304,6 +1311,8 @@ struct ggml_backend_vk_context {
     std::vector<int> query_fusion_node_count;
     std::vector<ggml_tensor *> query_nodes;
     std::vector<int> query_node_idx;
+    // non-null => this query slot closes a sub-node interval logged under this literal name.
+    std::vector<const char *> query_sub_names;
     int32_t num_queries {};
     int32_t query_idx {};
 };
