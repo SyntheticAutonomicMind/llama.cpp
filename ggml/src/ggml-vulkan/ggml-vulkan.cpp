@@ -9959,12 +9959,24 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx,
 
     GGML_ASSERT(mmp_map != nullptr);
 
+    // MMID_SMALLN: select the matmul tile by the expected per-expert column count rather
+    // than the aggregate batch. With E experts, each expert sees ~nei1*nei0/E rows;
+    // selecting by aggregate nei1 always picks the widest tile and leaves most lanes
+    // empty at MoE prefill. On by default; GGML_VK_MMID_SMALLN=0 disables.
+    uint32_t n_for_tile     = (uint32_t) nei1;
+    static const char * mmid_smalln_env = getenv("GGML_VK_MMID_SMALLN");
+    if (!(mmid_smalln_env && atoi(mmid_smalln_env) == 0) && n_as > 1) {
+        n_for_tile = std::max<uint32_t>(1u, (uint32_t) ((nei1 * nei0 + n_as - 1) / n_as));
+    }
+
     const uint32_t kpad =
         quantize_y ? 0 :
-                     ggml_vk_align_size(ne10, ggml_vk_guess_matmul_pipeline_align_map(ctx, *mmp_map, ne01, nei1, true));
-    const bool aligned = !quantize_y && ne10 == kpad && ne01 > 8 && nei1 > 8;
+                     ggml_vk_align_size(ne10, ggml_vk_guess_matmul_pipeline_align_map(ctx, *mmp_map, ne01,
+                                                                                       n_for_tile, true));
+    const bool aligned = !quantize_y && ne10 == kpad && ne01 > 8 && n_for_tile > 8;
 
-    vk_pipeline pipeline = ggml_vk_guess_matmul_pipeline_map(ctx, *mmp_map, ne01, nei1, aligned, true);
+    vk_pipeline pipeline =
+        ggml_vk_guess_matmul_pipeline_map(ctx, *mmp_map, ne01, n_for_tile, aligned, true);
 
     if (ggml_nbytes(src0) > ctx->device->properties.limits.maxStorageBufferRange) {
         pipeline = ggml_vk_get_64b_indexing_pipeline(ctx, pipeline);
