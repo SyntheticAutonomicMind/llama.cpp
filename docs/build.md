@@ -710,6 +710,19 @@ On Windows arm64, use `GGML_KLEIDIAI_SME=<n>` as the temporary diagnostics/debug
 
 If the CPU does not support the required SME-family capability for a bundled kernel, that kernel is disabled regardless of the environment variable.
 
+## Vulkan Runtime Overrides
+
+These environment variables tune the Vulkan backend at runtime. They default to sensible values for the detected hardware.
+
+- **`GGML_VK_DENSE_F16B`** — Use f16 B-type matmul pipelines for quantized dense MUL_MAT on coopmat1. Halves B memory bandwidth. `0` = off, `1` = all shapes, `auto` = only ne10 == 5120 (the only width measured to gain on RDNA3.5). Default: `0` (off — was always-on in earlier revisions of this fork).
+- **`GGML_VK_MMID_F16B`** — Same f16-B optimization but for MUL_MAT_ID (MoE decode). On by default since it is consistently faster for MoE decode. Set to `0` to disable.
+- **`GGML_VK_MMID_SMALLN`** — Select the MulMatID matmul tile by expected per-expert column count rather than aggregate batch. On by default for MoE prefill. Set to `0` to disable.
+- **`GGML_VK_MM_ALIGN_L`** — Override the large-tile K alignment (default 128, 32 on AMD coopmat1). Set to 32..128 for probing.
+- **`GGML_VK_FA_WAVE32`** — Pin a 32-wide subgroup for coopmat1 flash attention where narrowing is free (`1` = apply, `0` = disable, `2` = force regardless of head size). On by default on AMD.
+- **`GGML_VK_DENSE_WAVE32`** — Run quantized dense coopmat pipelines at wave32 on RDNA3.5 (`0` = disable, `1` = on, `2` = also retile float paths). Default: `1`.
+- **`GGML_VK_PERF_LOGGER`** — Enable the Vulkan perf logger (one timestamp per graph node). Set `GGML_VK_PERF_LOGGER_CONCURRENT=1` for fusion-aware concurrent timing.
+- **`GGML_VK_MGPU`** — Comma-separated device list to enable multi-GPU scheduling. See [## Multi-GPU](#multi-gpu) below.
+
 ## OpenCL
 
 This provides GPU acceleration through OpenCL on recent Adreno GPU.
