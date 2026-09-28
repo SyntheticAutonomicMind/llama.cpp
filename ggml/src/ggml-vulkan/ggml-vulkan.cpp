@@ -1944,6 +1944,28 @@ static bool ggml_vk_fa_scalar_uses_mmq(const vk_device & device, ggml_type k_typ
 #endif
 }
 
+// GGML_VK_DENSE_F16B: route quantized MUL_MAT through f16-B kernels on coopmat1, halving
+// B bytes moved. Numerically identical (B is rounded to f16 in shared memory either way).
+// 0 = off, 1 = all shapes, 2 = auto (only ne10 == 5120, the only width measured to gain on RDNA3.5)
+static int ggml_vk_dense_f16b_mode() {
+    static const int mode = [] {
+        const char * e = getenv("GGML_VK_DENSE_F16B");
+        if (e == nullptr) return 0;  // off by default; was always-on in earlier revisions of this fork
+        if (e[0] == 'a') return 2;
+        return atoi(e) != 0 ? 1 : 0;
+    }();
+    return mode;
+}
+static bool ggml_vk_dense_f16b_enabled() { return ggml_vk_dense_f16b_mode() != 0; }
+
+// GGML_VK_MMID_F16B: same idea as GGML_VK_DENSE_F16B but for MUL_MAT_ID (MoE decode).
+// On by default; =0 disables. The f16-B MulMatID pipelines are created unconditionally
+// in load_shaders; this gate only controls whether AMD dispatches route through them.
+static bool ggml_vk_mmid_f16b_enabled() {
+    const char * env = getenv("GGML_VK_MMID_F16B");
+    return env == nullptr || atoi(env) != 0;
+}
+
 void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
     VK_LOG_DEBUG("ggml_vk_load_shaders(" << device->name << ")");
 
@@ -8598,8 +8620,28 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx,
     const bool is_coopmat     = ctx->device->coopmat_support || ctx->device->coopmat2;
     const bool can_quantize_y = (ctx->device->integer_dot_product || ctx->device->coopmat_int_support) &&
                                 src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && (ne11 * ne10) % 4 == 0;
-    // coopmat shaders are fast enough that memory bandwidth reduction from f16 activations helps
-    const bool prefer_f16_b = is_coopmat && ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32;
+    // Route quantized MUL_MAT through f16-B kernels on coopmat1. Halves the B bytes moved,
+    // keeping activations inside the LLC at large ubatch. coopmat2 already routes through f16-B
+    // unconditionally. For coopmat1 the f16-B pipelines are created in load_shaders; this gate
+    // controls whether dispatch selects them (off by default; GGML_VK_DENSE_F16B=1 all shapes,
+    // =auto only ne10==5120).
+    // =auto restricts to ne10 == 5120 (only width measured to gain on gfx1151); =1 is all shapes.
+    const bool dense_f16b = ggml_vk_dense_f16b_enabled() &&
+                            (ggml_vk_dense_f16b_mode() == 1 || ne10 == 5120) &&
+                            ctx->device->coopmat_support && !ctx->device->coopmat2 &&
+                            ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32;
+    if (dense_f16b) {
+        static bool dense_f16b_logged = false;
+        if (!dense_f16b_logged) {
+            dense_f16b_logged = true;
+#if defined(GGML_USE_LOGGING)
+            ggml_log(GGML_LOG_LEVEL_INFO, "ggml_vulkan: MUL_MAT f16-B path engaged (GGML_VK_DENSE_F16B)\n");
+#endif
+        }
+    }
+
+    const bool prefer_f16_b = is_coopmat && ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32 &&
+                              (ctx->device->coopmat2 || dense_f16b);
 
     const ggml_type y_kernel_type = ggml_vk_mul_mat_b_type(
         ctx, src0->type, src1, f16_type, (ggml_prec) dst->op_params[0], false, can_quantize_y, prefer_f16_b);
@@ -9874,10 +9916,21 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx,
 #endif
     const bool can_quantize_y = (ctx->device->integer_dot_product || ctx->device->coopmat_int_support) &&
                                 src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && (ne11 * ne10) % 4 == 0;
-    // Intel coopmat1 matrix cores prefer f16 activations for quantized weights
+    // On coopmat1, prefer f16-B for quantized weights to halve B memory bandwidth.
+    // Intel was already enabled; AMD is gated on GGML_VK_MMID_F16B (on by default).
     const bool prefer_f16_b = ctx->device->coopmat_support && !ctx->device->coopmat2 &&
-                              ctx->device->vendor_id == VK_VENDOR_ID_INTEL && ggml_is_quantized(src0->type) &&
-                              src1->type == GGML_TYPE_F32;
+                              ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32 &&
+                              (ctx->device->vendor_id == VK_VENDOR_ID_INTEL ||
+                               (ctx->device->vendor_id == VK_VENDOR_ID_AMD && ggml_vk_mmid_f16b_enabled()));
+    if (prefer_f16_b && ctx->device->vendor_id == VK_VENDOR_ID_AMD) {
+        static bool mmid_f16b_logged = false;
+        if (!mmid_f16b_logged) {
+            mmid_f16b_logged = true;
+#if defined(GGML_USE_LOGGING)
+            ggml_log(GGML_LOG_LEVEL_INFO, "ggml_vulkan: MUL_MAT_ID f16-B path engaged (GGML_VK_MMID_F16B)\n");
+#endif
+        }
+    }
 
     const ggml_type y_kernel_type = ggml_vk_mul_mat_b_type(
         ctx, src0->type, src1, f16_type, (ggml_prec) dst->op_params[0], true, can_quantize_y, prefer_f16_b);
