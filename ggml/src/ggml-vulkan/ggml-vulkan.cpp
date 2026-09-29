@@ -17953,8 +17953,11 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             auto node_flops = ggml_vk_get_node_flops(cgraph->nodes[i]);
             total_flops += node_flops;
 
-            // Flush the current batch before recording a node that would push it over the flop threshold
-            if (flops_per_submit != 0 && submitted_nodes > 0 && batch_flops + node_flops >= flops_per_submit) {
+            // Flush the current batch before recording a node that would push it over the flop or byte threshold
+            auto node_bytes = ggml_vk_get_node_bytes(cgraph->nodes[i]);
+            if ((flops_per_submit != 0 && submitted_nodes > 0 && batch_flops + node_flops >= flops_per_submit) ||
+                (ctx->device->max_bytes_per_submit != 0 && submitted_nodes > 0 &&
+                 batch_bytes + node_bytes >= ctx->device->max_bytes_per_submit)) {
                 vk_context flush_ctx = ggml_vk_get_compute_ctx(ctx);
                 ggml_vk_ctx_end(flush_ctx);
                 flush_ctx->exit_tensor_idx = -1;
@@ -17965,7 +17968,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             }
 
             batch_flops += node_flops;
-            batch_bytes += ggml_vk_get_node_bytes(cgraph->nodes[i]);
+            batch_bytes += node_bytes;
         }
 
         // op_srcs_fused_elementwise indicates whether an op's srcs all contribute to
