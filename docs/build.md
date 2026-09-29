@@ -714,7 +714,7 @@ If the CPU does not support the required SME-family capability for a bundled ker
 
 These environment variables tune the Vulkan backend at runtime. They default to sensible values for the detected hardware.
 
-- **`GGML_VK_DENSE_F16B`** — Use f16 B-type matmul pipelines for quantized dense MUL_MAT on coopmat1. Halves B memory bandwidth. `0` = off, `1` = all shapes, `auto` = only ne10 == 5120 (the only width measured to gain on RDNA3.5). Default: `0` (off — was always-on in earlier revisions of this fork).
+- **`GGML_VK_DENSE_F16B`** — Use f16 B-type matmul pipelines for quantized dense MUL_MAT on coopmat1. Halves B memory bandwidth. `0` = off, `1` = all shapes, `auto` = only ne10 == 5120 (the only width measured to gain on RDNA3.5). Default: `auto` (on for shapes that pass the measured predicate).
 - **`GGML_VK_MMID_F16B`** — Same f16-B optimization but for MUL_MAT_ID (MoE decode). On by default since it is consistently faster for MoE decode. Set to `0` to disable.
 - **`GGML_VK_MMID_SMALLN`** — Select the MulMatID matmul tile by expected per-expert column count rather than aggregate batch. On by default for MoE prefill. Set to `0` to disable.
 - **`GGML_VK_MMID_BM64`** — Tile gate: taller small MulMatID tile (BM 32->64, two warps). Halves per-expert B re-reads in MoE decode. On by default. Set to `0` to disable.
