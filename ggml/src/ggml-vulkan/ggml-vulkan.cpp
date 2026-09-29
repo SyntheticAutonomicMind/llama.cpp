@@ -2700,6 +2700,15 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
         return result;
     };
 
+    // Snapshot MMQ warptiles before the dense wave32 retile, for the MMID tile gate
+    // probes below. The gate warptiles are derived from these wave64 snapshots so
+    // they can be retiled and reshaped independently of the dense path.
+    const auto l_warptile_mmq_w64 = l_warptile_mmq;
+    const auto m_warptile_mmq_w64 = m_warptile_mmq;
+    const auto s_warptile_mmq_w64 = s_warptile_mmq;
+    const auto m_mmq_wg_denoms_w64 = m_mmq_wg_denoms;
+    const auto s_mmq_wg_denoms_w64 = s_mmq_wg_denoms;
+
     // Deterministic subgroup sizing for the dense coopmat pipelines.
     // (1) The required subgroup size is the tile's own WARP, not the driver's choice.
     // (2) On AMD coopmat1, quantized dense tiles run at wave32 (RDNA3.x WMMA is
@@ -2959,10 +2968,72 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
         const bool cm1_pin = device->vendor_id == VK_VENDOR_ID_INTEL ||
                              (device->vendor_id == VK_VENDOR_ID_AMD && dense_wave32_possible && dense_wave32 != 0);
 
-        // Intel coopmat1 uses a dedicated large-tile config for quant matmul_id.
-        std::vector<vk_tile_config> tc_mmq_id = tc_mmq;
+        // MMID tile gate system: warptiles optimized for MoE decode where each
+        // expert sees fewer rows than a dense matmul. BM64/BM128/TILE16/MMID_WAVE32
+        // are on by default; all env-gated for probing. Shadows the dense MMQ
+        // warptiles for MMID quant pipelines only.
+        auto s_warptile_mmq_id_gate = s_warptile_mmq_w64;
+        auto m_warptile_mmq_id_gate = m_warptile_mmq_w64;
+        auto l_warptile_mmq_id_gate = l_warptile_mmq_w64;
+        auto s_mmq_wg_denoms_id_gate = s_mmq_wg_denoms_w64;
+        auto m_mmq_wg_denoms_id_gate = m_mmq_wg_denoms_w64;
+        uint32_t mmid_req_sgs = 0;
+
+        // BM64 (default on): taller small tile (BM 32->64, two warps).
+        const char * bm64_env = getenv("GGML_VK_MMID_BM64");
+        if (!bm64_env || atoi(bm64_env) != 0) {
+            s_warptile_mmq_id_gate[0] = 2 * mul_mat_subgroup_size;
+            s_warptile_mmq_id_gate[1] = 64;
+            s_mmq_wg_denoms_id_gate[0] = 64;
+        }
+        // BM128 (default on): taller medium tile (BM 64->128, four warps).
+        const char * m128_env = getenv("GGML_VK_MMID_M128");
+        if (!m128_env || atoi(m128_env) != 0) {
+            m_warptile_mmq_id_gate[0] = 4 * mul_mat_subgroup_size;
+            m_warptile_mmq_id_gate[1] = 128;
+            m_mmq_wg_denoms_id_gate[0] = 128;
+        }
+        // TILE16 (optional): narrow small tile to BN=16.
+        const char * tile16_env = getenv("GGML_VK_MMID_TILE16");
+        if (tile16_env && atoi(tile16_env) != 0) {
+            s_warptile_mmq_id_gate[2] = 16;
+            s_warptile_mmq_id_gate[5] = 16;
+            s_mmq_wg_denoms_id_gate[1] = 16;
+        }
+        // MMID_WAVE32 (default on, AMD + subgroup_size_control): force subgroup size 32.
+        const char * mmid_wave32_env = getenv("GGML_VK_MMID_WAVE32");
+        const bool mmid_sgs_scope = device->vendor_id == VK_VENDOR_ID_AMD &&
+                                  device->driver_id != vk::DriverId::eAmdProprietary && device->subgroup_size_control;
+        if ((!mmid_wave32_env || atoi(mmid_wave32_env) != 0) && mmid_sgs_scope &&
+            device->subgroup_min_size <= 32 && 32 <= device->subgroup_max_size) {
+            mmid_req_sgs = 32;
+            auto wave32_tile_id = [](std::vector<uint32_t> & w) {
+                w[10] = 32;
+                for (int guard = 0; guard < 4 && w[0] / w[10] != (w[1] / w[4]) * (w[2] / w[5]); ++guard) {
+                    if (w[4] >= w[5] && w[4] > w[7]) { w[4] /= 2; } else { w[5] /= 2; }
+                }
+                GGML_ASSERT(w[0] / w[10] == (w[1] / w[4]) * (w[2] / w[5]));
+                GGML_ASSERT(w[4] >= w[7] && w[5] >= w[8]);
+            };
+            wave32_tile_id(s_warptile_mmq_id_gate);
+            wave32_tile_id(m_warptile_mmq_id_gate);
+            wave32_tile_id(l_warptile_mmq_id_gate);
+        } else {
+            const uint32_t warp = s_warptile_mmq_id_gate[10];
+            if (mmid_sgs_scope && warp == m_warptile_mmq_id_gate[10] &&
+                warp == l_warptile_mmq_id_gate[10] && device->subgroup_min_size <= warp &&
+                warp <= device->subgroup_max_size) {
+                mmid_req_sgs = warp;
+            }
+        }
+        const bool mmid_pin = mmid_req_sgs != 0;
+        std::vector<vk_tile_config> tc_mmq_id_gate = {
+            { s_warptile_mmq_id_gate, s_mmq_wg_denoms_id_gate, s_align },
+            { m_warptile_mmq_id_gate, m_mmq_wg_denoms_id_gate, m_align },
+            { l_warptile_mmq_id_gate, l_mmq_wg_denoms, l_align }
+        };
         if (cm1_pin) {
-            tc_mmq_id[2] = {
+            tc_mmq_id_gate[2] = {
                 { 512, 128, 128, 32, 32, 32, 2, device->coopmat_m, device->coopmat_n, device->coopmat_k, 32 },
                 { 128, 128, 1 },
                 32
@@ -2973,7 +3044,8 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
                               const std::string & name, size_t len, const void * data, uint32_t pc_size, uint32_t pc) {
             auto tc = filter_tc(tc_base, key.type_a, key.mul_mat_id);
             if (!tc.empty()) {
-                create_mm_pipelines(key, tc, name, len, data, pc_size, pc, cm1_spec, false, true, 0, true, cm1_pin);
+                create_mm_pipelines(key, tc, name, len, data, pc_size, pc, cm1_spec, false, true, 0, true,
+                                    key.mul_mat_id ? mmid_pin : cm1_pin);
             }
         };
         auto cm1_create_quant = [&](vk_matmul_pipeline_key key, const std::vector<vk_tile_config> & tc_base,
@@ -2984,7 +3056,8 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
             };
             auto tc = filter_tc(tc_base, key.type_a, key.mul_mat_id);
             if (!tc.empty()) {
-                create_mm_pipelines(key, tc, name, len, data, pc_size, pc, qs, false, true, 0, true, cm1_pin);
+                create_mm_pipelines(key, tc, name, len, data, pc_size, pc, qs, false, true, 0, true,
+                                    key.mul_mat_id ? mmid_pin : cm1_pin);
             }
         };
         // int8 MMQ helper: per-type cm1 shader, warptile passed as-is (carries DEVICE_ARCH in
@@ -3174,20 +3247,20 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
 #    endif
         for (const auto type : non_lut_quant_types) {
             if (device->coopmat_acc_f16_support) {
-                cm1_create_quant({ type, GGML_TYPE_F32, true, true }, tc_mmq_id, "matmul_id_subgroup_quant_f32_f16acc",
+                cm1_create_quant({ type, GGML_TYPE_F32, true, true }, tc_mmq_id_gate, "matmul_id_subgroup_quant_f32_f16acc",
                                  matmul_id_subgroup_quant_f32_f16acc_cm1_len,
                                  matmul_id_subgroup_quant_f32_f16acc_cm1_data, sizeof(vk_mat_mat_id_push_constants),
                                  mul_mat_id_param_count);
-                cm1_create_quant({ type, GGML_TYPE_F16, true, true }, tc_mmq_id, "matmul_id_subgroup_quant_f16_f16acc",
+                cm1_create_quant({ type, GGML_TYPE_F16, true, true }, tc_mmq_id_gate, "matmul_id_subgroup_quant_f16_f16acc",
                                  matmul_id_subgroup_quant_f16_f16acc_cm1_len,
                                  matmul_id_subgroup_quant_f16_f16acc_cm1_data, sizeof(vk_mat_mat_id_push_constants),
                                  mul_mat_id_param_count);
             }
             if (device->coopmat_acc_f32_support) {
-                cm1_create_quant({ type, GGML_TYPE_F32, true, false }, tc_mmq_id, "matmul_id_subgroup_quant_f32",
+                cm1_create_quant({ type, GGML_TYPE_F32, true, false }, tc_mmq_id_gate, "matmul_id_subgroup_quant_f32",
                                  matmul_id_subgroup_quant_f32_cm1_len, matmul_id_subgroup_quant_f32_cm1_data,
                                  sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);
-                cm1_create_quant({ type, GGML_TYPE_F16, true, false }, tc_mmq_id, "matmul_id_subgroup_quant_f16",
+                cm1_create_quant({ type, GGML_TYPE_F16, true, false }, tc_mmq_id_gate, "matmul_id_subgroup_quant_f16",
                                  matmul_id_subgroup_quant_f16_cm1_len, matmul_id_subgroup_quant_f16_cm1_data,
                                  sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);
             }
@@ -3195,20 +3268,20 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
         // The _f16 variants provide the f16 B-type pipeline used when y_non_contig converts f32->f16.
 #    define X_CM1_ID(TYPE, tstr)                                                                                  \
         if (device->coopmat_acc_f16_support) {                                                                    \
-            cm1_create({ TYPE, GGML_TYPE_F32, true, true }, tc_mmq_id, "matmul_id_subgroup_" #tstr "_f32_f16acc", \
+            cm1_create({ TYPE, GGML_TYPE_F32, true, true }, tc_mmq_id_gate, "matmul_id_subgroup_" #tstr "_f32_f16acc", \
                        matmul_id_subgroup_##tstr##_f32_f16acc_cm1_len,                                            \
                        matmul_id_subgroup_##tstr##_f32_f16acc_cm1_data, sizeof(vk_mat_mat_id_push_constants),     \
                        mul_mat_id_param_count);                                                                   \
-            cm1_create({ TYPE, GGML_TYPE_F16, true, true }, tc_mmq_id, "matmul_id_subgroup_" #tstr "_f16_f16acc", \
+            cm1_create({ TYPE, GGML_TYPE_F16, true, true }, tc_mmq_id_gate, "matmul_id_subgroup_" #tstr "_f16_f16acc", \
                        matmul_id_subgroup_##tstr##_f16_f16acc_cm1_len,                                            \
                        matmul_id_subgroup_##tstr##_f16_f16acc_cm1_data, sizeof(vk_mat_mat_id_push_constants),     \
                        mul_mat_id_param_count);                                                                   \
         }                                                                                                         \
         if (device->coopmat_acc_f32_support) {                                                                    \
-            cm1_create({ TYPE, GGML_TYPE_F32, true, false }, tc_mmq_id, "matmul_id_subgroup_" #tstr "_f32",       \
+            cm1_create({ TYPE, GGML_TYPE_F32, true, false }, tc_mmq_id_gate, "matmul_id_subgroup_" #tstr "_f32",       \
                        matmul_id_subgroup_##tstr##_f32_cm1_len, matmul_id_subgroup_##tstr##_f32_cm1_data,         \
                        sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);                             \
-            cm1_create({ TYPE, GGML_TYPE_F16, true, false }, tc_mmq_id, "matmul_id_subgroup_" #tstr "_f16",       \
+            cm1_create({ TYPE, GGML_TYPE_F16, true, false }, tc_mmq_id_gate, "matmul_id_subgroup_" #tstr "_f16",       \
                        matmul_id_subgroup_##tstr##_f16_cm1_len, matmul_id_subgroup_##tstr##_f16_cm1_data,         \
                        sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);                             \
         }
@@ -3217,22 +3290,22 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
         if (device->ocp_fp4) {
 #        define X_CM1_ID_OCP(TYPE, tstr)                                                                              \
             if (device->coopmat_acc_f16_support) {                                                                    \
-                cm1_create({ TYPE, GGML_TYPE_F32, true, true }, tc_mmq_id,                                            \
+                cm1_create({ TYPE, GGML_TYPE_F32, true, true }, tc_mmq_id_gate,                                            \
                            "matmul_id_subgroup_" #tstr "_f32_ocp_f16acc",                                             \
                            matmul_id_subgroup_##tstr##_f32_ocp_f16acc_cm1_len,                                        \
                            matmul_id_subgroup_##tstr##_f32_ocp_f16acc_cm1_data, sizeof(vk_mat_mat_id_push_constants), \
                            mul_mat_id_param_count);                                                                   \
-                cm1_create({ TYPE, GGML_TYPE_F16, true, true }, tc_mmq_id,                                            \
+                cm1_create({ TYPE, GGML_TYPE_F16, true, true }, tc_mmq_id_gate,                                            \
                            "matmul_id_subgroup_" #tstr "_f16_ocp_f16acc",                                             \
                            matmul_id_subgroup_##tstr##_f16_ocp_f16acc_cm1_len,                                        \
                            matmul_id_subgroup_##tstr##_f16_ocp_f16acc_cm1_data, sizeof(vk_mat_mat_id_push_constants), \
                            mul_mat_id_param_count);                                                                   \
             }                                                                                                         \
             if (device->coopmat_acc_f32_support) {                                                                    \
-                cm1_create({ TYPE, GGML_TYPE_F32, true, false }, tc_mmq_id, "matmul_id_subgroup_" #tstr "_f32_ocp",   \
+                cm1_create({ TYPE, GGML_TYPE_F32, true, false }, tc_mmq_id_gate, "matmul_id_subgroup_" #tstr "_f32_ocp",   \
                            matmul_id_subgroup_##tstr##_f32_ocp_cm1_len, matmul_id_subgroup_##tstr##_f32_ocp_cm1_data, \
                            sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);                             \
-                cm1_create({ TYPE, GGML_TYPE_F16, true, false }, tc_mmq_id, "matmul_id_subgroup_" #tstr "_f16_ocp",   \
+                cm1_create({ TYPE, GGML_TYPE_F16, true, false }, tc_mmq_id_gate, "matmul_id_subgroup_" #tstr "_f16_ocp",   \
                            matmul_id_subgroup_##tstr##_f16_ocp_cm1_len, matmul_id_subgroup_##tstr##_f16_ocp_cm1_data, \
                            sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);                             \
             }
