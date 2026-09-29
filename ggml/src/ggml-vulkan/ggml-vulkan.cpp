@@ -8740,7 +8740,12 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx,
     ggml_type f16_type = src0->type == GGML_TYPE_BF16 ? GGML_TYPE_BF16 : GGML_TYPE_F16;
 
     const bool is_coopmat     = ctx->device->coopmat_support || ctx->device->coopmat2;
-    const bool can_quantize_y = (ctx->device->integer_dot_product || ctx->device->coopmat_int_support) &&
+    // RDNA 3.5 coopmat dequant is faster than integer dot for wide prompt batches.
+    // Prefer the f16-B path (which keeps B in fp16 and uses coopmat dequant) over the
+    // integer dot product path when ne11 >= 256.
+    const bool prefer_f16_prompt = ctx->device->vendor_id == VK_VENDOR_ID_AMD && ne11 >= 256;
+    const bool can_quantize_y = !prefer_f16_prompt &&
+                                (ctx->device->integer_dot_product || ctx->device->coopmat_int_support) &&
                                 src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && (ne11 * ne10) % 4 == 0;
     // Route quantized MUL_MAT through f16-B kernels on coopmat1. Halves the B bytes moved,
     // keeping activations inside the LLC at large ubatch. coopmat2 already routes through f16-B
@@ -10041,7 +10046,11 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx,
 #else
     const bool y_decode_vector_staging = false;
 #endif
-    const bool can_quantize_y = (ctx->device->integer_dot_product || ctx->device->coopmat_int_support) &&
+    // RDNA 3.5 coopmat dequant is faster than integer dot for large top-10 MoE batches.
+    // Prefer f16-B (coopmat dequant) over integer dot when nei0 == 10 and nei1 >= 256.
+    const bool prefer_f16_moe = ctx->device->vendor_id == VK_VENDOR_ID_AMD && nei0 == 10 && nei1 >= 256;
+    const bool can_quantize_y = !prefer_f16_moe &&
+                                (ctx->device->integer_dot_product || ctx->device->coopmat_int_support) &&
                                 src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && (ne11 * ne10) % 4 == 0;
     // On coopmat1, prefer f16-B for quantized weights to halve B memory bandwidth.
     // Intel was already enabled; AMD is gated on GGML_VK_MMID_F16B (on by default).
