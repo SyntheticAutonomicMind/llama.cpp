@@ -95,6 +95,8 @@ struct buffer_view {
     }
 };
 
+void llama_clear_tensor_data(ggml_tensor * t, size_t offset, size_t size);
+
 void replace_all(std::string & s, const std::string & search, const std::string & replace);
 
 // announce a direct host write to a tensor's data pointer (for the scheduler sanitizer)

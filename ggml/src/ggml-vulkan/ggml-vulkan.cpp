@@ -889,6 +889,7 @@ void ggml_pipeline_allocate_descriptor_sets(ggml_backend_vk_context * ctx) {
     uint32_t to_alloc = needed - ctx->descriptor_sets.size();
     uint32_t pool_remaining =
         VK_DEVICE_DESCRIPTOR_POOL_SIZE - ctx->descriptor_sets.size() % VK_DEVICE_DESCRIPTOR_POOL_SIZE;
+    ctx->descriptor_set_bindings.resize(needed);
     uint32_t pool_idx = ctx->descriptor_sets.size() / VK_DEVICE_DESCRIPTOR_POOL_SIZE;
 
     while (to_alloc > 0) {
@@ -9816,7 +9817,8 @@ void ggml_vk_dsv4_hc_post(ggml_backend_vk_context * ctx,
                           const ggml_tensor *       residual,
                           const ggml_tensor *       post,
                           const ggml_tensor *       comb,
-                          ggml_tensor *             dst) {
+                          ggml_tensor *             dst,
+                          const ggml_tensor *       gate_scale_in) {
     VK_LOG_DEBUG("ggml_vk_dsv4_hc_post(" << x << ", " << residual << ", " << post << ", " << comb << ", " << dst
                                          << ")");
 
@@ -9831,7 +9833,9 @@ void ggml_vk_dsv4_hc_post(ggml_backend_vk_context * ctx,
 
     const vk_subbuffer x_buf = ggml_vk_tensor_subbuffer(ctx, x, true);
     const vk_subbuffer r_buf = ggml_vk_tensor_subbuffer(ctx, residual, true);
-    const vk_subbuffer p_buf = ggml_vk_tensor_subbuffer(ctx, post, true);
+    // with a fused gate, post is scale(sigmoid(scale(p_src))) and the shader applies it to p_src
+    const ggml_tensor * p_src = gate_scale_in ? gate_scale_in->src[0] : post;
+    const vk_subbuffer p_buf = ggml_vk_tensor_subbuffer(ctx, p_src,    true);
     const vk_subbuffer c_buf = comb ? ggml_vk_tensor_subbuffer(ctx, comb, true) : x_buf;
     const vk_subbuffer d_buf = ggml_vk_tensor_subbuffer(ctx, dst, true);
 
@@ -9843,21 +9847,20 @@ void ggml_vk_dsv4_hc_post(ggml_backend_vk_context * ctx,
         ggml_vk_nb_elem(residual, 0),
         ggml_vk_nb_elem(residual, 1),
         ggml_vk_nb_elem(residual, 2),
-        ggml_vk_nb_elem(post, 0),
-        ggml_vk_nb_elem(post, 1),
+        ggml_vk_nb_elem(p_src, 0),
+        ggml_vk_nb_elem(p_src, 1),
         comb ? ggml_vk_nb_elem(comb, 0) : 0,
         comb ? ggml_vk_nb_elem(comb, 1) : 0,
         comb ? ggml_vk_nb_elem(comb, 2) : 0,
         ggml_vk_nb_elem(dst, 0),
         ggml_vk_nb_elem(dst, 1),
         ggml_vk_nb_elem(dst, 2),
-        0,
-        0,
-        0,
-        0,
-        0,
+        0, 0, 0, 0, 0,
+        gate_scale_in ? 1u : 0u,
+        gate_scale_in ? ggml_get_op_params_f32(gate_scale_in, 0) : 1.0f,
+        gate_scale_in ? ggml_get_op_params_f32(post, 0) : 1.0f,
     };
-    init_pushconst_tensor_offsets(ctx, pc, x, residual, post, comb, dst);
+    init_pushconst_tensor_offsets(ctx, pc, x, residual, p_src, comb, dst);
 
     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { x_buf, r_buf, p_buf, c_buf, d_buf }, pc,
                               { n_embd, n_tokens, 1 });
