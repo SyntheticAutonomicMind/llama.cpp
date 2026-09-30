@@ -73,6 +73,8 @@ if (Vulkan_FOUND)
     set_target_properties(ggml-vulkan PROPERTIES
                           CXX_VISIBILITY_PRESET hidden
                           VISIBILITY_INLINES_HIDDEN ON)
+    # Export logging variable so ggml_log calls in the f16-B path are compiled in
+    target_compile_definitions(ggml-vulkan PRIVATE GGML_USE_LOGGING)
 
     set(VULKAN_SHADER_GEN_CMAKE_ARGS "")
 

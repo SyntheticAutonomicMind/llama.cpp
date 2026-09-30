@@ -8656,11 +8656,11 @@ static ggml_type ggml_vk_mul_mat_b_type(ggml_backend_vk_context * ctx,
     auto available = [&](ggml_type b) {
         return ggml_vk_get_mul_mat_mat_pipeline_map(ctx, src0_type, b, prec, mul_mat_id) != nullptr;
     };
-    if (can_quantize_y && available(GGML_TYPE_Q8_1)) {
-        return GGML_TYPE_Q8_1;
-    }
     if (prefer_f16_b && available(f16_type)) {
         return f16_type;
+    }
+    if (can_quantize_y && available(GGML_TYPE_Q8_1)) {
+        return GGML_TYPE_Q8_1;
     }
     if (ggml_vk_dim01_contiguous(src1) && available(src1->type)) {
         return src1->type;
@@ -8767,7 +8767,7 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx,
         if (!dense_f16b_logged) {
             dense_f16b_logged = true;
 #if defined(GGML_USE_LOGGING)
-            ggml_log(GGML_LOG_LEVEL_INFO, "ggml_vulkan: MUL_MAT f16-B path engaged (GGML_VK_DENSE_F16B)\n");
+            ggml_log_internal(GGML_LOG_LEVEL_INFO, "ggml_vulkan: MUL_MAT f16-B path engaged (GGML_VK_DENSE_F16B)\n");
 #endif
         }
     }
@@ -10063,7 +10063,7 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx,
         if (!mmid_f16b_logged) {
             mmid_f16b_logged = true;
 #if defined(GGML_USE_LOGGING)
-            ggml_log(GGML_LOG_LEVEL_INFO, "ggml_vulkan: MUL_MAT_ID f16-B path engaged (GGML_VK_MMID_F16B)\n");
+            ggml_log_internal(GGML_LOG_LEVEL_INFO, "ggml_vulkan: MUL_MAT_ID f16-B path engaged (GGML_VK_MMID_F16B)\n");
 #endif
         }
     }
