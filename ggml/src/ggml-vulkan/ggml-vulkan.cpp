@@ -8767,13 +8767,13 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx,
         if (!dense_f16b_logged) {
             dense_f16b_logged = true;
 #if defined(GGML_USE_LOGGING)
-            ggml_log_internal(GGML_LOG_LEVEL_INFO, "ggml_vulkan: MUL_MAT f16-B path engaged (GGML_VK_DENSE_F16B)\n");
+            fprintf(stderr, "ggml_vulkan: MUL_MAT f16-B path engaged (GGML_VK_DENSE_F16B)\n");
 #endif
         }
     }
 
     const bool prefer_f16_b = is_coopmat && ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32 &&
-                              (ctx->device->coopmat2 || dense_f16b);
+                              (ctx->device->coopmat2 || dense_f16b || prefer_f16_prompt);
 
     const ggml_type y_kernel_type = ggml_vk_mul_mat_b_type(
         ctx, src0->type, src1, f16_type, (ggml_prec) dst->op_params[0], false, can_quantize_y, prefer_f16_b);
@@ -10052,18 +10052,18 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx,
     const bool can_quantize_y = !prefer_f16_moe &&
                                 (ctx->device->integer_dot_product || ctx->device->coopmat_int_support) &&
                                 src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && (ne11 * ne10) % 4 == 0;
-    // On coopmat1, prefer f16-B for quantized weights to halve B memory bandwidth.
-    // Intel was already enabled; AMD is gated on GGML_VK_MMID_F16B (on by default).
-    const bool prefer_f16_b = ctx->device->coopmat_support && !ctx->device->coopmat2 &&
-                              ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32 &&
-                              (ctx->device->vendor_id == VK_VENDOR_ID_INTEL ||
-                               (ctx->device->vendor_id == VK_VENDOR_ID_AMD && ggml_vk_mmid_f16b_enabled()));
-    if (prefer_f16_b && ctx->device->vendor_id == VK_VENDOR_ID_AMD) {
+   // On coopmat1, prefer f16-B for quantized weights to halve B memory bandwidth.
+   // Intel was already enabled; AMD is gated on GGML_VK_MMID_F16B (on by default).
+   const bool prefer_f16_b = ctx->device->coopmat_support && !ctx->device->coopmat2 &&
+                            ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32 &&
+                            (ctx->device->vendor_id == VK_VENDOR_ID_INTEL ||
+                               (ctx->device->vendor_id == VK_VENDOR_ID_AMD && (ggml_vk_mmid_f16b_enabled() || prefer_f16_moe)));
+   if (prefer_f16_b && ctx->device->vendor_id == VK_VENDOR_ID_AMD) {
         static bool mmid_f16b_logged = false;
         if (!mmid_f16b_logged) {
             mmid_f16b_logged = true;
 #if defined(GGML_USE_LOGGING)
-            ggml_log_internal(GGML_LOG_LEVEL_INFO, "ggml_vulkan: MUL_MAT_ID f16-B path engaged (GGML_VK_MMID_F16B)\n");
+            fprintf(stderr, "ggml_vulkan: MUL_MAT_ID f16-B path engaged (GGML_VK_MMID_F16B)\n");
 #endif
         }
     }
