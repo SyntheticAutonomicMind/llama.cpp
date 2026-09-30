@@ -8767,7 +8767,7 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx,
         if (!dense_f16b_logged) {
             dense_f16b_logged = true;
 #if defined(GGML_USE_LOGGING)
-            fprintf(stderr, "ggml_vulkan: MUL_MAT f16-B path engaged (GGML_VK_DENSE_F16B)\n");
+            GGML_LOG_WARN("ggml_vulkan: MUL_MAT f16-B path engaged (GGML_VK_DENSE_F16B)\n");
 #endif
         }
     }
@@ -10063,7 +10063,7 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx,
         if (!mmid_f16b_logged) {
             mmid_f16b_logged = true;
 #if defined(GGML_USE_LOGGING)
-            fprintf(stderr, "ggml_vulkan: MUL_MAT_ID f16-B path engaged (GGML_VK_MMID_F16B)\n");
+            GGML_LOG_WARN("ggml_vulkan: MUL_MAT_ID f16-B path engaged (GGML_VK_MMID_F16B)\n");
 #endif
         }
     }
