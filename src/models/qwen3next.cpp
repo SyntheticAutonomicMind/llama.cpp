@@ -483,6 +483,10 @@ ggml_tensor * llama_model_qwen3next::graph::build_layer_attn_linear(
     int64_t qkv_dim = head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads;
     int64_t nb1_qkv = ggml_row_size(conv_qkv_mix->type, qkv_dim);
 
+    // Verify conv_qkv_mix is contiguous along dim 0 so the view strides below are valid
+    GGML_ASSERT(conv_qkv_mix->nb[0] == ggml_element_size(conv_qkv_mix));
+    GGML_ASSERT(conv_qkv_mix->ne[0] == qkv_dim);
+
     // Extract the convolved Q, K, V from conv_output
     ggml_tensor * q_conv = ggml_view_4d(ctx0, conv_qkv_mix, head_k_dim, num_k_heads, n_seq_tokens, n_seqs,
             ggml_row_size(conv_qkv_mix->type, head_k_dim),
