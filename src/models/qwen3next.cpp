@@ -319,8 +319,10 @@ std::pair<ggml_tensor *, ggml_tensor *> llama_model_qwen3next::graph::build_qkvz
     const int64_t head_k_dim   = hparams.ssm_d_state;
     const int64_t num_k_heads  = hparams.ssm_n_group;
     const int64_t num_v_heads  = hparams.ssm_dt_rank;
-    const int64_t head_v_dim   = d_inner / num_v_heads;
+    const int64_t head_v_dim   = hparams.ssm_d_state;
     const int64_t n_seq_tokens = ubatch.n_seq_tokens;
+
+    GGML_ASSERT(head_v_dim * num_v_heads == d_inner);
 
     if (model.layers[il].wqkv) {
         // optimized path
@@ -403,12 +405,13 @@ ggml_tensor * llama_model_qwen3next::graph::build_layer_attn_linear(
     const int64_t head_k_dim   = hparams.ssm_d_state;
     const int64_t num_k_heads  = hparams.ssm_n_group;
     const int64_t num_v_heads  = hparams.ssm_dt_rank;
-    const int64_t head_v_dim   = d_inner / num_v_heads;
+    const int64_t head_v_dim   = hparams.ssm_d_state;
     const int64_t n_seq_tokens = ubatch.n_seq_tokens;
 
     GGML_ASSERT(n_seqs != 0);
     GGML_ASSERT(ubatch.equal_seqs());
     GGML_ASSERT(ubatch.n_tokens == n_seq_tokens * n_seqs);
+    GGML_ASSERT(head_v_dim * num_v_heads == d_inner);
 
     // Input projections
     auto qkvz = build_qkvz(cur, il);
@@ -460,7 +463,7 @@ ggml_tensor * llama_model_qwen3next::graph::build_layer_attn_linear(
 
     ggml_tensor * conv_kernel      = model.layers[il].ssm_conv1d;
     const int64_t conv_kernel_size = conv_kernel->ne[0];
-    const int64_t conv_channels    = d_inner + 2 * hparams.ssm_n_group * hparams.ssm_d_state;
+    const int64_t conv_channels    = head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads;
 
     ggml_tensor * conv_input = build_conv_state(inp, conv_states_all, qkv_mixed, conv_kernel_size, conv_channels, il);
 
@@ -612,7 +615,8 @@ ggml_tensor * llama_model_qwen3next::graph::build_layer_ffn(ggml_tensor * cur, c
             cur = moe_out;
         }
     } else {
-        // Dense FFN branch (not currently used I believe)
+        // Dense FFN fallback (Qwen3-Next currently always uses MoE, but keep
+        // this path for variants or future configs without shared/dense routing)
         cur = build_ffn(cur,
             model.layers[il].ffn_up, NULL, NULL,
             model.layers[il].ffn_gate, NULL, NULL,
