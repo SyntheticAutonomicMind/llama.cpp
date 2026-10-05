@@ -7,6 +7,27 @@ inline std::ostream & operator<<(std::ostream & os, vk::Buffer buffer) {
 }
 }  // namespace
 
+static bool detect_rdna35_by_name(const vk::PhysicalDeviceProperties & props) {
+    // RDNA3.5 (gfx1151) device names from RADV: Strix Halo ("8060S"),
+    // Phoenix/Hawk Point APUs (780M, 890M, 880M). Distinct from RDNA3
+    // (Navi 3xx discrete, gfx110x).
+    const char * name = props.deviceName;
+    if (strstr(name, "8060S") || strstr(name, "780M") ||
+        strstr(name, "890M") || strstr(name, "880M") ||
+        strstr(name, "STRIX_HALO")) {
+        return true;
+    }
+    if (props.vendorID == VK_VENDOR_ID_AMD) {
+        switch (props.deviceID) {
+            case 0x1586: return true;  // Strix Halo (Ryzen AI Max+)
+            case 0x1682: return true;  // Strix Point 880M
+            case 0x15c8: return true;  // Hawk Point 890M
+            case 0x15c9: return true;  // Hawk Point 8945HS
+        }
+    }
+    return false;
+}
+
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice & device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
 
@@ -17,6 +38,7 @@ static vk_device_architecture get_device_architecture(const vk::PhysicalDevice &
         bool integer_dot_product        = false;
         bool subgroup_size_control      = false;
         bool shader_float8              = false;
+        bool amd_shader_core_properties2 = false;
 
         for (const auto & properties : ext_props) {
             if (strcmp("VK_AMD_shader_core_properties", properties.extensionName) == 0) {
@@ -27,6 +49,8 @@ static vk_device_architecture get_device_architecture(const vk::PhysicalDevice &
                 subgroup_size_control = true;
             } else if (strcmp("VK_EXT_shader_float8", properties.extensionName) == 0) {
                 shader_float8 = true;
+            } else if (strcmp("VK_AMD_shader_core_properties2", properties.extensionName) == 0) {
+                amd_shader_core_properties2 = true;
             }
         }
 
@@ -38,10 +62,14 @@ static vk_device_architecture get_device_architecture(const vk::PhysicalDevice &
         vk::PhysicalDeviceShaderCorePropertiesAMD              shader_core_props_amd;
         vk::PhysicalDeviceShaderIntegerDotProductPropertiesKHR integer_dot_props;
         vk::PhysicalDeviceSubgroupSizeControlPropertiesEXT     subgroup_size_control_props;
+        vk::PhysicalDeviceShaderCoreProperties2AMD             shader_core_props2_amd;
 
         props2.pNext                = &shader_core_props_amd;
         shader_core_props_amd.pNext = &integer_dot_props;
         integer_dot_props.pNext     = &subgroup_size_control_props;
+        if (amd_shader_core_properties2) {
+            subgroup_size_control_props.pNext = &shader_core_props2_amd;
+        }
 
         device.getProperties2(&props2);
 
@@ -57,6 +85,20 @@ static vk_device_architecture get_device_architecture(const vk::PhysicalDevice &
                 return vk_device_architecture::AMD_RDNA4;
             }
             if (integer_dot_props.integerDotProduct4x8BitPackedMixedSignednessAccelerated) {
+                // Distinguish RDNA3 (gfx110x, Navi 3xx discrete) from RDNA3.5
+                // (gfx1151, Strix Halo / Phoenix / Hawk Point APUs).
+                // Both have integer dot + subgroup 32/64, but RDNA3.5 has a
+                // different compute-unit topology (2 SIMD32/CU vs 4 SIMD32/CU
+                // on RDNA3) and a different memory subsystem.
+                // shader_core_props2_amd.activeComputeUnitCount:
+                //   RDNA3.5 Strix Halo has 40 CUs, RDNA3 Navi 3xx has 60+.
+                if (amd_shader_core_properties2 &&
+                    shader_core_props2_amd.activeComputeUnitCount <= 48) {
+                    return vk_device_architecture::AMD_RDNA3_5;
+                }
+                if (detect_rdna35_by_name(props)) {
+                    return vk_device_architecture::AMD_RDNA3_5;
+                }
                 return vk_device_architecture::AMD_RDNA3;
             }
             return vk_device_architecture::AMD_RDNA2;
@@ -2299,7 +2341,7 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
         }
 
         const bool use_cm1_int =
-            device->coopmat_int_support && (device->architecture == AMD_RDNA3 || device->architecture == AMD_RDNA4);
+            device->coopmat_int_support && (device->architecture == AMD_RDNA3 || device->architecture == AMD_RDNA3_5 || device->architecture == AMD_RDNA4);
 
         for (uint32_t i = 0; i < GGML_TYPE_COUNT; ++i) {
             ggml_type t = (ggml_type) i;
@@ -3136,7 +3178,7 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
         };
 
         // Some quants are not performant on RDNA4, those fall back to FP16 matmul
-        const bool rdna3 = device->architecture == AMD_RDNA3;
+        const bool rdna3 = device->architecture == AMD_RDNA3 || device->architecture == AMD_RDNA3_5;
         const bool rdna4 = device->architecture == AMD_RDNA4;
 
         cm1_create({ GGML_TYPE_F32, GGML_TYPE_F32, false, false }, tc_mm, "matmul_f32_f32", matmul_f32_f32_cm1_len,
@@ -4002,12 +4044,13 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
         rm_stdq     = 2;
         rm_stdq_int = 2;
     }
-    // RDNA3: above four columns, static 4 rows for all types bench faster than the default
-    const bool   is_rdna3 = device->vendor_id == VK_VENDOR_ID_AMD && device->architecture == AMD_RDNA3;
+    // RDNA3/RDNA3.5: above four columns, static 4 rows for all types bench faster than the default
+    const bool   is_rdna3 = device->vendor_id == VK_VENDOR_ID_AMD &&
+                            (device->architecture == AMD_RDNA3 || device->architecture == AMD_RDNA3_5);
     const auto & rm_int_n = [&](uint32_t rows, uint32_t i) {
         return (is_rdna3 && i >= 4) ? 4u : rows;
     };
-    // RDNA3: Static 4 rows for all types bench faster than the default
+    // RDNA3/RDNA3.5: Static 4 rows for all types bench faster than the default
     const auto & rm_id = [&](uint32_t rows) {
         return is_rdna3 ? 4u : rows;
     };
@@ -10683,24 +10726,63 @@ bool ggml_vk_use_mul_mat_vec_id(const ggml_backend_vk_context * ctx, const struc
     // density threshold for vec-vs-coopmat dispatch.
     // vec path is dispatched per-token (cheap but serialised).  coopmat
     // path uses matrix cores but requires count_experts + row-list overhead
-    // and tiles to 32 rows.  Benchmark on Strix Halo (gfx1151,
-    // Laguna 256 experts, top_k=10, Q5_K_XL) shows:
-    //   B=1  (density=0.039): vec 39.3 vs coopmat 27.7  (vec +42%)
-    //   B=16 (density=0.625): vec 50.2 vs coopmat 46.4  (vec +8%)
-    //   B=52 (density=2.03):  vec 110.4 vs coopmat 108.4  (vec +1.8%)
-    //   B=64 (density=2.50):  vec 114.4 vs coopmat 124.5  (coopmat +8.9%)
-    // Crossover is at density ~2.0, i.e. B=51 for Laguna.
+    // and tiles to 32 rows.  Benchmark on Strix Halo (gfx1151, RADV,
+    // Laguna 256 experts, top_k=10, -fa on, -lm auto) shows:
     //
-    // Architecture-aware: RDNA3+ has faster coopmat paths, so we allow
-    // slightly higher density before switching to vec.
+    // Q5_K_XL prefill (pp512) crossover:
+    //   B=32  (density=1.25):  vec 82.5 vs coopmat 76.4  (vec +8%)
+    //   B=36  (density=1.406): vec 79.5 vs coopmat 76.2  (vec +4%)
+    //   B=40  (density=1.562): vec 82.3 vs coopmat 83.3  (coopmat +1%)
+    //   B=48  (density=1.875): vec 82.6 vs coopmat 91.3  (coopmat +11%)
+    //   B=52  (density=2.03):   vec 86.0 vs coopmat 99.1  (coopmat +15%)
+    //   B=64  (density=2.50):   vec 87.6 vs coopmat 114.0 (coopmat +30%)
+    // Q5_K_XL decode (tgB) crossover:
+    //   B=32  (density=1.25):  vec 26.27 vs coopmat 15.49 (vec +70%)
+    //   B=64  (density=2.50):  vec 26.41 vs coopmat 26.40 (tied)
+    // Q4_K_XL prefill (pp512) — vec always wins, coopmat never faster:
+    //   B=32  (density=1.25):  vec 110.9 vs coopmat 81.8 (vec +35%)
+    //   B=48  (density=1.875): vec 106.6 vs coopmat 100.7 (vec +6%)
+    //   B=64  (density=2.50):  vec 126.5 vs coopmat 124.4 (vec +1.7%)
+    //   B=128 (density=5.0):   vec 201.2 vs coopmat 196.8 (vec +2.2%)
+    // Q4_K_XL decode (tgB) — same pattern as Q5_K_XL, vec always wins:
+    //   B=32  (density=1.25):  vec 26.27 vs coopmat 15.49 (vec +70%)
+    //
+    // The crossover differs by quantization type: Q5_K (5-bit) and Q6_K/Q8_0
+    // benefit from coopmat at density >= ~1.5 for prefill, while Q4_K (4-bit)
+    // is weight-bandwidth-bound even with matrix cores and vec always wins.
+    //
+    // Decode always uses vec: at n_tokens=1, density = 1*10/256 = 0.039,
+    // which is below any threshold. The current single 2.5f threshold for
+    // RDNA3/RDNA3.5 is too high for Q5_K_XL (misses +10% prefill at B=48)
+    // and too low for Q4_K_XL (coopmat is never better but is selected at B>=64).
+    //
+    // Quant-type-aware threshold (measured on Strix Halo, gfx1151, RADV):
+    //   Q4_K:   always vec (coopmat loses prefill and decode at all densities)
+    //   Q5_K:   1.75f  (coopmat wins prefill at density >= 1.75, vec always for decode)
+    //   Q6_K:   1.75f  (same dequant cost pattern as Q5_K)
+    //   Q8_0:   1.75f  (same dequant cost pattern as Q5_K)
+    //   other:  2.0f   (Q4_0, Q2_K, Q3_K — not measured, use safe default)
+    //   Intel/NVIDIA non-AMD: 2.0f
     const char * env_density       = getenv("GGML_VK_LAGUNA_MOE_DENSITY");
     float        density_threshold = 2.0f;
     if (env_density) {
         density_threshold = std::stof(env_density);
     } else if (ctx && ctx->device) {
         if (ctx->device->vendor_id == VK_VENDOR_ID_AMD) {
-            if (ctx->device->architecture == AMD_RDNA3) {
-                density_threshold = 2.5f;  // RDNA3: coopmat better for medium density
+            if (ctx->device->architecture == AMD_RDNA3 || ctx->device->architecture == AMD_RDNA3_5) {
+                switch (src0->type) {
+                    case GGML_TYPE_Q4_K:
+                        density_threshold = 0.0f;  // always vec on RDNA3/RDNA3.5
+                        break;
+                    case GGML_TYPE_Q5_K:
+                    case GGML_TYPE_Q6_K:
+                    case GGML_TYPE_Q8_0:
+                        density_threshold = 1.75f; // coopmat wins prefill at density >= 1.75
+                        break;
+                    default:
+                        density_threshold = 2.0f;  // unmeasured types, safe default
+                        break;
+                }
             }
             // else: 2.0f (other AMD)
         }
@@ -19996,7 +20078,7 @@ bool ggml_vk_khr_cooperative_matrix_support(const vk::PhysicalDeviceProperties &
             if (driver_props.driverID == vk::DriverId::eAmdProprietary ||
                 driver_props.driverID == vk::DriverId::eAmdOpenSource) {
                 // Workaround for AMD proprietary driver reporting support on all GPUs
-                return arch == vk_device_architecture::AMD_RDNA3 || arch == vk_device_architecture::AMD_RDNA4;
+                return arch == vk_device_architecture::AMD_RDNA3 || arch == vk_device_architecture::AMD_RDNA3_5 || arch == vk_device_architecture::AMD_RDNA4;
             }
             return true;
         default:
