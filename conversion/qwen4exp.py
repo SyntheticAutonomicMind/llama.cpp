@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, cast
+from typing import Any, Callable, Iterable, cast
 
 import torch
 from torch import Tensor
@@ -25,15 +25,54 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
 
     model_arch = gguf.MODEL_ARCH.QWEN4EXP
 
-    # the MTP block is a separate draft head; vLLM drops it too
-    supports_mtp_export = False
-    no_mtp = True
+    # the MTP block is a separate draft head
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # only the shard names, so the table itself is never held
         self._ple_shards: dict[int, str] = {}
         self._ple_row_dim: int | None = None
+
+    @classmethod
+    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
+        name = item[0]
+        # The MTP block carries its own final hyper-connection mixer. An MTP-only file has
+        # no trunk, so that one becomes the file's mixer; a full model already has the
+        # trunk's, and graph_mtp reads it, so this copy is dropped.
+        if name.startswith("mtp.hyper_connection_mixer."):
+            if cls.no_mtp:
+                return None
+            # the draft's mixer is its own (it differs from the trunk's), so it stays
+            # with the draft block as blk.N.nextn.hc_head_* in both file layouts
+            assert cls._original_block_count is not None
+            return (f"model.layers.{cls._original_block_count}.{name[len('mtp.'):]}", item[1])
+        return super().filter_tensors(item)
+
+    def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
+        yield from super().generate_extra_tensors()
+
+        # the reference adds the two MTP input projections, and A*e + B*h == [A|B]*concat(e, h),
+        # so they join into the one eh_proj the tensor map already handles
+        e_name = "mtp.fc_embedding.weight"
+        h_name = "mtp.fc_hidden.weight"
+
+        have_e = e_name in self.model_tensors
+        have_h = h_name in self.model_tensors
+        if not have_e and not have_h:
+            return
+        if not have_e or not have_h:
+            raise KeyError(f"unpaired MTP input projection: need both {e_name} and {h_name}")
+
+        from .base import LazyTorchTensor
+
+        e = LazyTorchTensor.to_eager(self.model_tensors[e_name]())
+        h = LazyTorchTensor.to_eager(self.model_tensors[h_name]())
+        yield (self.format_tensor_name(gguf.MODEL_TENSOR.NEXTN_EH_PROJ,
+                                       self.hparams["num_hidden_layers"]),
+               torch.cat([e, h], dim=1).contiguous())
+
+        del self.model_tensors[e_name]
+        del self.model_tensors[h_name]
 
     def _read_hash_constants(self, suffix: str) -> list[int]:
         """Read an int64 PLE constant straight from the checkpoint.
@@ -63,14 +102,16 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
         self.gguf_writer.add_indexer_top_k(hp["indexer_budget"])
         ratio = hp["indexer_compress_ratio"]
         layer_types = hp["layer_types"]
-        self.gguf_writer.add_attention_compress_ratios(
-            [ratio if layer_types[i] == "full_attention" else 0 for i in range(n_layer)]
-        )
+        ratios = [ratio if layer_types[i] == "full_attention" else 0 for i in range(n_layer)]
+        # the MTP block extends block_count, and this array is read per block. The draft
+        # attends dense, so it takes 0, the same value a non-QSA layer gets.
+        ratios += [0] * (self.block_count - n_layer)
+        self.gguf_writer.add_attention_compress_ratios(ratios)
 
         # ple_layer_ids is 1-based in the HF config; empty means no n-gram table,
         # so emit no PLE keys rather than optional ones
         ple_layers = [i - 1 for i in hp["ple_layer_ids"]]
-        if not ple_layers:
+        if not ple_layers or self.mtp_only:
             return
         self.gguf_writer.add_ple_layers(ple_layers)
         self.gguf_writer.add_ple_ngram_size(hp["ngram_size"])
