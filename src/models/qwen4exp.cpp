@@ -532,11 +532,27 @@ ggml_tensor * llama_model_qwen4exp::graph::build_hc_mix(
 
     // grouped RMSNorm: reduce over one stream, then scale all streams with the [n_embd, hc] gamma
     // the converter folded each gamma to (1 + w)
-    ggml_tensor * xn = ggml_mul(ctx0, ggml_rms_norm(ctx0, x, hparams.f_norm_rms_eps), w_norm);
+    //
+    // The gamma is viewed as [n_embd, hc] and applied to the [n_embd, hc, T] norm output so that the
+    // RMS_NORM and MUL nodes are adjacent in the graph (backends fuse that pair). The view of the
+    // weight is expanded first so it does not land between them.
+    ggml_tensor * w_norm_hc = ggml_reshape_2d(ctx0, w_norm, n_embd, hc);
+    ggml_build_forward_expand(gf, w_norm_hc);
+
+    ggml_tensor * xn = ggml_rms_norm(ctx0, x, hparams.f_norm_rms_eps);
+    xn = ggml_mul(ctx0, xn, w_norm_hc);
     xn = ggml_reshape_2d(ctx0, xn, hc_dim, nt);
     cb(xn, "hc_norm", il);
 
+    if (inject) {
+        *inject = build_lora_mm(w_inject, xn);
+        cb(*inject, "hc_inject", il);
+        ggml_build_forward_expand(gf, *inject);
+    }
     ggml_tensor * lo = build_lora_mm(w_down, xn);
+    if (inject) {
+        ggml_build_forward_expand(gf, lo);
+    }
     lo = ggml_silu(ctx0, ggml_scale(ctx0, lo, 1.0f / (float) hc));
     ggml_tensor * gate = build_lora_mm(w_up, lo);
     cb(gate, "hc_gate", il);
@@ -566,11 +582,6 @@ ggml_tensor * llama_model_qwen4exp::graph::build_hc_mix(
     }
     cb(mixed, "hc_mixed", il);
 
-    if (inject) {
-        *inject = build_lora_mm(w_inject, xn);
-        cb(*inject, "hc_inject", il);
-    }
-
     return mixed;
 }
 
@@ -592,6 +603,13 @@ ggml_tensor * llama_model_qwen4exp::graph::build_hc_combine(
         cur = ggml_dsv4_hc_post(ctx0, block_out, residual, w, nullptr);
         res->add_fused_node({LLM_FUSED_OP_DSV4_HC_POST, cur, il});
     } else {
+        // Emit the block output first and the scatter-weight chain right after it, so that
+        // scale -> sigmoid -> scale -> repeat -> mul -> add is one contiguous node run that
+        // backends can fuse into a single kernel.
+        ggml_build_forward_expand(gf, residual);
+        ggml_build_forward_expand(gf, block_out);
+        ggml_build_forward_expand(gf, w);
+
         w = ggml_reshape_3d(ctx0, w, 1, hc, nt);
 
         ggml_tensor * b = ggml_reshape_3d(ctx0, block_out, n_embd, 1, nt);
