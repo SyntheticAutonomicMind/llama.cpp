@@ -44,8 +44,10 @@ public:
     void clear(bool data) override;
 
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
-    // touching cell.pos / tail / rs_idx. avoids the n_rs_seq rollback
-    // path in seq_rm. see llama-memory-recurrent.cpp for details.
+    // touching cell.tail / cell.head / rs_idx. clears cell.pos/src and
+    // decrements used when cells become empty (mirroring seq_rm). avoids
+    // the n_rs_seq rollback path in seq_rm. see llama-memory-recurrent.cpp
+    // for details.
     bool seq_rm_positions_only(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
     void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) override;
     void seq_keep(llama_seq_id seq_id)                                                          override;
