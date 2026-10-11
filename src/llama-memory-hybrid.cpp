@@ -192,8 +192,26 @@ void llama_memory_hybrid::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p
 }
 
 llama_pos llama_memory_hybrid::seq_pos_min(llama_seq_id seq_id) const {
-    // the min of the total cache is the max of the two caches' min values
-    return std::max(mem_attn->seq_pos_min(seq_id), mem_recr->seq_pos_min(seq_id));
+    // The server's checkpoint validation uses seq_pos_min() to guard the
+    // checkpoint search: if pos_min >= pos_min_thold (i.e. LCP), it enters
+    // the checkpoint block. For hybrid models, the recurrent cache's
+    // seq_pos_min() tracks the rolling R/S buffer position, which advances
+    // far past the attention cache's last token when the recurrent state
+    // is ahead of attention (common in SSM layers with partial attention).
+    // This makes seq_pos_min() report a large value even when the attention
+    // KV cache (the part that's actually checkpointed and restored) starts at 0.
+    //
+    // Using max(attn_min, recr_min) causes the checkpoint block to be entered
+    // unconditionally on hybrid models, where the single end-of-prompt
+    // checkpoint is always rejected by the pos_max > pos_next guard, forcing
+    // a full prompt re-process and n_past=0 even when the attention KV cache
+    // is perfectly valid.
+    //
+    // Return only the attention cache's pos_min — the recurrent state's
+    // position is tracked separately via update_tgt/load_tgt with
+    // PARTIAL_ONLY flags and is not part of the server's checkpoint
+    // validation logic.
+    return mem_attn->seq_pos_min(seq_id);
 }
 
 llama_pos llama_memory_hybrid::seq_pos_max(llama_seq_id seq_id) const {
