@@ -154,6 +154,28 @@ bool llama_memory_hybrid_iswa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_p
     return mem_attn->seq_rm(seq_id, p0, p1);
 }
 
+bool llama_memory_hybrid_iswa::seq_rm_attn_only(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    // clears attention cache cells beyond p0 (regular seq_rm path), AND
+    // clears stale position tracking in the recurrent cache for the
+    // same range via seq_rm_positions_only.
+    //
+    // the recurrent R/S tensor data is intentionally preserved: full
+    // seq_rm on mem_recr would trigger the n_rs_seq rollback path and
+    // can fail (return false) for rollback amounts > n_rs_seq on
+    // mamba/GDN models. seq_rm_positions_only removes seq_id from cells
+    // past p0 without modifying cell.pos / tail, so it never enters the
+    // rollback path.
+    //
+    // this dual clear is required because hybrid seq_pos_max returns
+    // min(attn_pos_max, recr_pos_max). if we only clear attn but leave
+    // recr's stale positions intact, seq_pos_max still reports the
+    // stale value and llama_batch_init validation fails on the next
+    // batch.
+    const bool ok = mem_attn->seq_rm(seq_id, p0, p1);
+    mem_recr->seq_rm_positions_only(seq_id, p0, p1);
+    return ok;
+}
+
 void llama_memory_hybrid_iswa::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
     mem_attn->seq_cp(seq_id_src, seq_id_dst, p0, p1);
     mem_recr->seq_cp(seq_id_src, seq_id_dst, p0, p1);
@@ -175,8 +197,26 @@ void llama_memory_hybrid_iswa::seq_div(llama_seq_id seq_id, llama_pos p0, llama_
 }
 
 llama_pos llama_memory_hybrid_iswa::seq_pos_min(llama_seq_id seq_id) const {
-    // the min of the total cache is the max of the two caches' min values
-    return std::max(mem_attn->seq_pos_min(seq_id), mem_recr->seq_pos_min(seq_id));
+    // The server's checkpoint validation uses seq_pos_min() to guard the
+    // checkpoint search: if pos_min >= pos_min_thold (i.e. LCP), it enters
+    // the checkpoint block. For hybrid models, the recurrent cache's
+    // seq_pos_min() tracks the rolling R/S buffer position, which advances
+    // far past the attention cache's last token when the recurrent state
+    // is ahead of attention (common in SSM layers with partial attention).
+    // This makes seq_pos_min() report a large value even when the attention
+    // KV cache (the part that's actually checkpointed and restored) starts at 0.
+    //
+    // Using max(attn_min, recr_min) causes the checkpoint block to be entered
+    // unconditionally on hybrid models, where the single end-of-prompt
+    // checkpoint is always rejected by the pos_max > pos_next guard, forcing
+    // a full prompt re-process and n_past=0 even when the attention KV cache
+    // is perfectly valid.
+    //
+    // Return only the attention cache's pos_min — the recurrent state's
+    // position is tracked separately via update_tgt/load_tgt with
+    // PARTIAL_ONLY flags and is not part of the server's checkpoint
+    // validation logic.
+    return mem_attn->seq_pos_min(seq_id);
 }
 
 llama_pos llama_memory_hybrid_iswa::seq_pos_max(llama_seq_id seq_id) const {

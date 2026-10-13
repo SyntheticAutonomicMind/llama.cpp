@@ -63,7 +63,8 @@ struct vk_mat_mat_id_push_constants {
     uint32_t batch_stride_a; uint32_t batch_stride_b; uint32_t batch_stride_d;
     uint32_t nei0; uint32_t nei1; uint32_t nbi1; uint32_t ne11;
     uint32_t n_experts;
-    uint32_t row_ids_offset;
+    uint32_t hoist_row_ids;
+    uint32_t fusion_flags;
 };
 
 struct vk_mat_vec_id_push_constants {
@@ -218,10 +219,9 @@ struct vk_op_count_experts_push_constants {
     uint32_t nb01;
     uint32_t a_offset;
     uint32_t n_experts;
+    uint32_t hoist_row_ids;
     uint32_t ne00mp;
     uint32_t ne00L;
-    uint32_t row_tile_size;
-    uint32_t row_ids_offset;
 };
 
 struct vk_op_glu_push_constants {
@@ -675,7 +675,9 @@ struct vk_op_lightning_indexer_push_constants {
     uint32_t n_kv;
     uint32_t n_heads;
     uint32_t n_tokens;
+    uint32_t n_streams;
     uint32_t n_masks;
+    uint32_t dispatch_x;
     uint32_t q_nb1;
     uint32_t q_nb2;
     uint32_t q_nb3;
@@ -690,6 +692,40 @@ struct vk_op_lightning_indexer_push_constants {
 };
 
 static_assert(sizeof(vk_op_lightning_indexer_push_constants) <= 128);
+
+// Coopmat prefill/decode variants (lightning_indexer_cm.comp / _decode_cm.comp) use a
+// distinct push-constant layout: HEAD_SIZE=128, N_HEAD=64 and K=F16 are all hardcoded in the
+// shader so they aren't parameters. All strides are element-based: the cm shaders declare
+// buffers as typed arrays (float/float16_t) and index by element, so strides must be
+// element strides (nb/type_size), not byte strides.
+struct vk_op_lightning_indexer_cm_push_constants {
+    uint32_t n_kv;
+    uint32_t n_batch;
+    uint32_t n_stream;
+    uint32_t nem3;
+    // dst element strides (ne[1] = n_kv, ne[3] = n_stream; ne[2] = 1 and skipped).
+    uint32_t nb1;
+    uint32_t nb3;
+    // Q element strides: ne[1] = n_head, ne[2] = n_batch, ne[3] = n_stream.
+    uint32_t nbq1;
+    uint32_t nbq2;
+    uint32_t nbq3;
+    // K element strides: float16_t data_k[] indexes by element, so use element strides.
+    uint32_t nbk2;
+    uint32_t nbk3;
+    uint32_t nbw1;
+    uint32_t nbw3;
+    uint32_t nbm1;
+    uint32_t nbm3;
+
+    uint32_t q_offset;
+    uint32_t k_offset;
+    uint32_t w_offset;
+    uint32_t m_offset;
+    uint32_t d_offset;
+};
+static_assert(sizeof(vk_op_lightning_indexer_cm_push_constants) <= 128,
+              "sizeof(vk_op_lightning_indexer_cm_push_constants) must be <= 128");
 
 struct vk_op_gated_delta_net_push_constants {
     uint32_t H;
@@ -1118,6 +1154,19 @@ template <> inline void init_pushconst_tensor_offsets(ggml_backend_vk_context * 
     GGML_UNUSED(src1);
     GGML_UNUSED(src2);
     GGML_UNUSED(src3);
+}
+
+template <> inline void init_pushconst_tensor_offsets(ggml_backend_vk_context * ctx, vk_op_lightning_indexer_cm_push_constants &p, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, const ggml_tensor * src3, ggml_tensor * dst) {
+    // The cm shaders do not use the *_offset fields: buffers are bound via
+    // vk_subbuffer which already includes the tensor's byte offset, so the
+    // shader indexes from the start of the tensor data. These offsets are
+    // set for completeness but are not read by the shader's push constant
+    // block.
+    p.q_offset = get_misalign_bytes(ctx, src0) / ggml_type_size(src0->type);
+    p.k_offset = get_misalign_bytes(ctx, src1);
+    p.w_offset = get_misalign_bytes(ctx, src2) / ggml_type_size(src2->type);
+    p.m_offset = get_misalign_bytes(ctx, src3) / ggml_type_size(src3->type);
+    p.d_offset = get_misalign_bytes(ctx, dst)  / ggml_type_size(dst->type);
 }
 
 static vk_op_binary_push_constants ggml_vk_rms_norm_push_constants(

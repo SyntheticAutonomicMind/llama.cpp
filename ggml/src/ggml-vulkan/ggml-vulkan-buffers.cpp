@@ -1,14 +1,12 @@
 #include "ggml-vulkan-common.h"
 
 ggml_backend_buffer_type_i ggml_backend_vk_buffer_type_interface = {
-    /* .get_name            = */ ggml_backend_vk_buffer_type_name,
-    /* .alloc_buffer        = */ ggml_backend_vk_buffer_type_alloc_buffer,
-    /* .alloc_buffer_n      = */ NULL,
-    /* .get_alignment       = */ ggml_backend_vk_buffer_type_get_alignment,
-    /* .get_max_size        = */ ggml_backend_vk_buffer_type_get_max_size,
-    /* .get_alloc_size      = */ ggml_backend_vk_buffer_type_get_alloc_size,
-    /* .get_alloc_size_n    = */ NULL,
-    /* .is_host             = */ NULL,
+    /* .get_name         = */ ggml_backend_vk_buffer_type_name,
+    /* .alloc_buffer     = */ ggml_backend_vk_buffer_type_alloc_buffer,
+    /* .get_alignment    = */ ggml_backend_vk_buffer_type_get_alignment,
+    /* .get_max_size     = */ ggml_backend_vk_buffer_type_get_max_size,
+    /* .get_alloc_size   = */ ggml_backend_vk_buffer_type_get_alloc_size,
+    /* .is_host          = */ NULL,
 };
 
 static std::vector<uint32_t> ggml_vk_find_memory_properties(const vk::PhysicalDeviceMemoryProperties* mem_props, vk::MemoryRequirements* mem_req, vk::MemoryPropertyFlags flags) {
@@ -250,7 +248,7 @@ void * ggml_vk_host_malloc(vk_device& device, size_t size) {
          vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
 
     if(!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible)) {
-        fprintf(stderr, "WARNING: failed to allocate %.2f MB of pinned memory\n",
+        GGML_LOG_WARN("ggml_vulkan: failed to allocate %.2f MB of pinned memory\n",
             size/1024.0/1024.0);
         device->device.freeMemory(buf->device_memory);
         device->device.destroyBuffer(buf->buffer);
@@ -282,7 +280,7 @@ void ggml_vk_host_free(vk_device& device, void* ptr) {
         }
     }
     if (buf == nullptr) {
-        fprintf(stderr, "WARNING: failed to free pinned memory: memory not in map\n");
+        GGML_LOG_WARN("ggml_vulkan: failed to free pinned memory: memory not in map\n");
         return;
     }
 
@@ -623,10 +621,13 @@ void ggml_vk_buffer_read_2d(vk_buffer& src, size_t offset, void * dst, size_t sp
     // If the device is not an UMA device the memory is host-accessible through rebar. While writing
     // through PCIe is sufficient fast reading back data from PCIe is slower than going through
     // the HW device to host copy path.
-    // AMD UMA: uncached host-visible memory is write-combined, CPU reads are slow
-    const bool slow_host_read = src->device->vendor_id == VK_VENDOR_ID_AMD &&
-                                !(src->memory_property_flags & vk::MemoryPropertyFlagBits::eHostCached);
-    if(src->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible && src->device->uma && !slow_host_read) {
+    // On UMA a direct CPU read is only fast from a host-cached mapping. A write-combined mapping
+    // (host-visible without HOST_CACHED, which is what amdgpu gives for GTT) reads back at
+    // uncached speed, so bulk reads must use the device copy path. Small reads stay direct to
+    // avoid the fence round trip.
+    const bool host_cached = bool(src->memory_property_flags & vk::MemoryPropertyFlagBits::eHostCached);
+    if((src->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible) && src->device->uma &&
+       (host_cached || width * height <= 64 * 1024)) {
         GGML_ASSERT(src->memory_property_flags & vk::MemoryPropertyFlagBits::eHostCoherent);
 
         std::lock_guard<std::recursive_mutex> guard(src->device->mutex);

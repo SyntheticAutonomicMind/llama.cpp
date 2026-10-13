@@ -233,7 +233,7 @@ void llm_graph_input_pos_bucket::set_input(const llama_ubatch * ubatch) {
     if (pos_bucket) {
         const int64_t n_tokens = ubatch->n_tokens;
 
-        GGML_ASSERT(ggml_backend_buffer_is_host(pos_bucket->buffer));
+        llama_host_write(pos_bucket);
         GGML_ASSERT(!ubatch->equal_seqs()); // TODO: use ubatch->n_seqs instead of failing
 
         int32_t * data = (int32_t *) pos_bucket->data;
@@ -257,7 +257,7 @@ void llm_graph_input_out_ids::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_tokens = ubatch->n_tokens;
 
-    GGML_ASSERT(ggml_backend_buffer_is_host(out_ids->buffer));
+    llama_host_write(out_ids);
     int32_t * data = (int32_t *) out_ids->data;
 
     if (n_outputs == n_tokens) {
@@ -297,7 +297,7 @@ void llm_graph_input_mean::set_input(const llama_ubatch * ubatch) {
         const int64_t n_seqs_unq   = ubatch->n_seqs_unq;
 
         GGML_ASSERT(mean);
-        GGML_ASSERT(ggml_backend_buffer_is_host(mean->buffer));
+        llama_host_write(mean);
 
         float * data = (float *) mean->data;
         memset(mean->data, 0, n_tokens*n_seqs_unq*ggml_element_size(mean));
@@ -343,7 +343,7 @@ void llm_graph_input_cls::set_input(const llama_ubatch * ubatch) {
         cparams.pooling_type == LLAMA_POOLING_TYPE_LAST
     )) {
         GGML_ASSERT(cls);
-        GGML_ASSERT(ggml_backend_buffer_is_host(cls->buffer));
+        llama_host_write(cls);
 
         uint32_t * data = (uint32_t *) cls->data;
         memset(cls->data, 0, n_seqs_unq*ggml_element_size(cls));
@@ -388,7 +388,7 @@ void llm_graph_input_rs::set_input(const llama_ubatch * ubatch) {
     const int64_t n_rs = mctx->get_n_rs();
 
     if (s_copy) {
-        GGML_ASSERT(ggml_backend_buffer_is_host(s_copy->buffer));
+        llama_host_write(s_copy);
         int32_t * data = (int32_t *) s_copy->data;
 
         // assuming copy destinations ALWAYS happen ONLY on the cells between head and head+n
@@ -504,7 +504,7 @@ void llm_graph_input_attn_no_cache::set_input(const llama_ubatch * ubatch) {
     };
 
     GGML_ASSERT(self_kq_mask);
-    GGML_ASSERT(ggml_backend_buffer_is_host(self_kq_mask->buffer));
+    llama_host_write(self_kq_mask);
     if (self_kq_mask->type == GGML_TYPE_F16) {
         fill_mask((ggml_fp16_t *) self_kq_mask->data, ggml_nelements(self_kq_mask), 0, LLAMA_SWA_TYPE_NONE);
     } else {
@@ -513,7 +513,7 @@ void llm_graph_input_attn_no_cache::set_input(const llama_ubatch * ubatch) {
 
     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
         GGML_ASSERT(self_kq_mask_swa);
-        GGML_ASSERT(ggml_backend_buffer_is_host(self_kq_mask_swa->buffer));
+        llama_host_write(self_kq_mask_swa);
         if (self_kq_mask_swa->type == GGML_TYPE_F16) {
             fill_mask((ggml_fp16_t *) self_kq_mask_swa->data, ggml_nelements(self_kq_mask_swa), hparams.n_swa, hparams.swa_type);
         } else {
@@ -834,7 +834,7 @@ static void dsv4_set_kq_mask(
     GGML_ASSERT(dst->ne[2] == 1);
     GGML_ASSERT(dst->ne[3] == n_stream);
     GGML_ASSERT((int64_t) plan.n_visible.size() == (int64_t) n_tokens);
-    GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
+    llama_host_write(dst);
 
     if (dst->type == GGML_TYPE_F32) {
         float * data = (float *) dst->data;
@@ -922,6 +922,17 @@ static bool dsv4_compress_debug() {
     }();
 
     return debug;
+}
+
+static ggml_prec llama_matmul_acc_prec() {
+    static const ggml_prec prec = []() {
+        const char * env = getenv("LLAMA_ACC_PREC");
+        if (env && (strcmp(env, "f32") == 0 || strcmp(env, "F32") == 0)) {
+            return GGML_PREC_F32;
+        }
+        return GGML_PREC_DEFAULT;
+    }();
+    return prec;
 }
 
 static void dsv4_set_comp_inputs(
@@ -1116,7 +1127,7 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
     const int64_t n_enc    = cross_kq_mask->ne[0];
     const int64_t n_tokens = ubatch->n_tokens;
 
-    GGML_ASSERT(ggml_backend_buffer_is_host(cross_kq_mask->buffer));
+    llama_host_write(cross_kq_mask);
     GGML_ASSERT(!ubatch->equal_seqs()); // TODO: use ubatch->n_seqs instead of failing
 
     const auto fill_mask = [&](auto * data) {
@@ -1150,7 +1161,10 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
     mctx->get_attn()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);
     mctx->get_attn()->set_input_v_idxs(inp_attn->self_v_idxs, ubatch);
 
-    mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
+    // a graph that consumes no mask (maskless selected-key attention) leaves it unallocated
+    if (inp_attn->self_kq_mask && inp_attn->self_kq_mask->buffer) {
+        mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
+    }
 
     if (inp_attn->self_k_rot) {
         mctx->get_attn()->set_input_k_rot(inp_attn->self_k_rot);
@@ -1162,8 +1176,8 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
-    if (inp_rs->s_copy) {
-        GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
+    if (inp_rs->s_copy && inp_rs->s_copy->buffer) {
+        llama_host_write(inp_rs->s_copy);
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
         // assuming copy destinations ALWAYS happen ONLY on the cells between head and head+n
@@ -1201,12 +1215,15 @@ bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
 void llm_graph_input_mem_hybrid_k::set_input(const llama_ubatch * ubatch) {
     mctx->get_attn()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);
 
-    mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
+    // a graph that consumes no mask (maskless selected-key attention) leaves it unallocated
+    if (inp_attn->self_kq_mask && inp_attn->self_kq_mask->buffer) {
+        mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
+    }
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
     if (inp_rs->s_copy) {
-        GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
+        llama_host_write(inp_rs->s_copy);
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
         // assuming copy destinations ALWAYS happen ONLY on the cells between head and head+n
@@ -1278,8 +1295,10 @@ void llm_graph_input_mem_hybrid_iswa::set_input(const llama_ubatch * ubatch) {
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
-    if (inp_rs->s_copy) {
-        GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
+    // a graph with no recurrent layers (the qwen4exp draft block on a hybrid-idx memory) never consumes the copy
+    // map, so the scheduler leaves it unallocated
+    if (inp_rs->s_copy && inp_rs->s_copy->buffer) {
+        llama_host_write(inp_rs->s_copy);
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 
         // assuming copy destinations ALWAYS happen ONLY on the cells between head and head+n
@@ -2433,11 +2452,22 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s, slots); // [n_embd, n_expert_used, n_tokens]
-    if (arch == LLM_ARCH_MISTRAL4) {
+    bool fuse_weight = false;
+    const bool can_fuse_down_weight =
+        !down_exps_b && !down_exps_s && !weight_before_ffn &&
+        !up_exps_s && !gate_exps_s && !gate_up_exps && !gate_exps &&
+        arch != LLM_ARCH_MISTRAL4;
+    if (can_fuse_down_weight) {
+        // Set weights as src[3] on the MUL_MAT_ID node.  The Vulkan backend
+        // will detect this and use a fused DOWN+weight kernel, avoiding
+        // the separate ggml_mul(experts, weights) node and its intermediate tensor.
+        experts->src[3] = weights;
+        fuse_weight = true;
+    } else if (arch == LLM_ARCH_MISTRAL4) {
         // src1 can exceed F16 range
         ggml_prec_set_src(experts, GGML_PREC_F32, 1);
     }
-    cb(experts, "ffn_moe_down", il);
+    cb(experts, fuse_weight ? "ffn_moe_down_fused" : "ffn_moe_down", il);
 
     if (down_exps_s) {
         cb(experts, "ffn_moe_down_scaled", il);
@@ -2448,7 +2478,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(experts, "ffn_moe_down_biased", il);
     }
 
-    if (!weight_before_ffn) {
+    if (!weight_before_ffn && !fuse_weight) {
         experts = ggml_mul(ctx0, experts, weights);
         cb(experts, "ffn_moe_weighted", il);
     }
@@ -2904,7 +2934,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX);
         ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
-        ggml_prec_set_acc(cur, GGML_PREC_F32);
+        // F16 accumulator is safe for FA on modern GPUs (CUDA FA already uses F16 matmul).
+        // Override to F32 with LLAMA_ACC_PREC=f32 for models with numerical issues.
+        ggml_prec_set_acc(cur, llama_matmul_acc_prec());
 
         if (v_mla) {
 #if 0
@@ -2929,8 +2961,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cb(kq, "kq", il);
 
         // note: this op tends to require high floating point range
-        //       while for some models F16 is enough, for others it is not, so we default to F32 here
-        ggml_prec_set_acc(kq, GGML_PREC_F32);
+        //       while for some models F16 is enough, for others it is not
+        //       default is F16 accumulator; override to F32 with LLAMA_ACC_PREC=f32
+        ggml_prec_set_acc(kq, llama_matmul_acc_prec());
 
         if (arch == LLM_ARCH_GROK) {
             // need to do the following:

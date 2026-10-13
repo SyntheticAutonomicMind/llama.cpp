@@ -4167,6 +4167,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MAX"));
     add_opt(common_arg(
+        {"--spec-draft-adaptive"},
+        string_format("size each draft from measured acceptance rather than always drafting --spec-draft-n-max (default: %s)", params.speculative.draft.adaptive ? "true" : "false"),
+        [](common_params & params) {
+            params.speculative.draft.adaptive = true;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_ADAPTIVE"));
+    add_opt(common_arg(
         {"--spec-draft-n-min"}, "N",
         string_format("minimum number of draft tokens to use for speculative decoding (default: %d)", params.speculative.draft.n_min),
         [](common_params & params, int value) {
@@ -4793,6 +4800,12 @@ void common_params_add_preset_options(std::vector<common_arg> & args) {
         "in server router mode, hide a cached model from the model list when this preset resolves to the same model file",
         [](common_params &, const std::string &) { /* unused */ }
     ).set_env(COMMON_ARG_PRESET_DEDUP_CACHE_MODELS).set_preset_only());
+
+    args.push_back(common_arg(
+        {"hidden"}, "0|1",
+        "in server router mode, omit this model from GET /models (it can still be loaded by name)",
+        [](common_params &, const std::string &) { /* unused */ }
+    ).set_env(COMMON_ARG_PRESET_HIDDEN).set_preset_only());
 
     // args.push_back(common_arg(
     //     {"pin"},

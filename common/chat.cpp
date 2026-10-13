@@ -1074,6 +1074,75 @@ static common_chat_params common_chat_params_init_gemma4_legacy(const common_cha
     return common_chat_params_init_gemma4(tmpl, adjusted);
 }
 
+static common_chat_params common_chat_params_init_laguna(const common_chat_template &          tmpl,
+                                                         const autoparser::generation_params & inputs) {
+    common_chat_params data;
+
+    const std::string THINK_END       = "";
+    const std::string TOOL_CALL_START = "";
+    const std::string TOOL_CALL_END   = "";
+    const std::string GEN_PROMPT      = "\n";
+
+    data.prompt             = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.generation_prompt  = common_chat_template_generation_prompt_impl(tmpl, inputs);
+    data.format             = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "";  // nominal; the block is force-opened by the template
+    data.thinking_end_tags.push_back(THINK_END);
+    data.preserved_tokens   = { TOOL_CALL_START, TOOL_CALL_END, THINK_END };
+
+    auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();
+    auto has_response_format = !inputs.json_schema.is_null() && inputs.json_schema.is_object();
+    // NOTE: unlike lfm2 we do NOT gate on tmpl.source().find("") -- Laguna's
+    // template never contains a literal  tag, only a prose directive.
+    auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
+    auto include_grammar     = has_response_format || (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
+
+    auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
+        auto generation_prompt = p.literal(GEN_PROMPT);
+        auto end = p.end();
+
+        // Force-opened reasoning: content up to the first  is the thought.
+        auto reasoning = p.eps();
+        if (extract_reasoning) {
+            reasoning = p.optional(p.reasoning(p.until(THINK_END)) + p.literal(THINK_END));
+        }
+
+        if (!has_tools || inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_NONE) {
+            if (has_response_format) {
+                auto response_format = p.content(p.schema(p.json(), "response-format-schema", inputs.json_schema));
+                return generation_prompt + reasoning + response_format + end;
+            }
+            return generation_prompt + reasoning + p.content(p.rest()) + end;
+        }
+
+        // ""n{"name": <fn>, "arguments": {...}}n""
+        auto tool_calls = p.standard_json_tools(TOOL_CALL_START, TOOL_CALL_END, inputs.tools,
+                                                inputs.parallel_tool_calls,
+                                                /* force_tool_calls = */ false,
+                                                /* name_key         = */ "name",
+                                                /* args_key         = */ "arguments");
+
+        auto content = p.content(p.until(TOOL_CALL_START));
+        return generation_prompt + reasoning + content + tool_calls + end;
+    });
+
+    data.parser = parser.save();
+
+    if (include_grammar) {
+        data.grammar_lazy = !(has_response_format || (has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED));
+        data.grammar      = build_grammar([&](const common_grammar_builder & builder) {
+            parser.build_grammar(builder, data.grammar_lazy);
+        });
+        data.grammar_triggers = {
+            { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, TOOL_CALL_START }
+        };
+    }
+
+    return data;
+}
+
+
 // Pick the dedicated handler for a template from its source, or null for the autoparser.
 // Order matters: the first match wins, and later checks assume the earlier ones did not match.
 static common_chat_params_init_fn common_chat_template_detect_params_init(const std::string & src) {
@@ -1224,6 +1293,15 @@ static common_chat_params_init_fn common_chat_template_detect_params_init(const 
         src.find("'<tool_call><function=' ~ tool_call.name ~ '>'") == std::string::npos) {
         LOG_DBG("Using specialized template: Qwen3-Coder\n");
         return common_chat_params_init_qwen3_coder;
+    }
+
+    // Poolside Laguna - <system>/<user>/assistant roles, force-opened reasoning,
+    //  tool calls. Keyed on two template-unique strings so it never shadows
+    // another family.
+    if (src.find("render_assistant_messages_raw") != std::string::npos &&
+        src.find("<available_tools>") != std::string::npos) {
+        LOG_DBG("Using specialized template: Laguna\n");
+        return common_chat_params_init_laguna;
     }
 
     return nullptr;

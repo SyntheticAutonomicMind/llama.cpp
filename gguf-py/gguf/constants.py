@@ -139,6 +139,7 @@ class Keys:
         LOGIT_SCALE                       = "{arch}.logit_scale"
         DECODER_START_TOKEN_ID            = "{arch}.decoder_start_token_id"
         DECODER_BLOCK_COUNT               = "{arch}.decoder_block_count"
+        DECODER_ARCH                      = "{arch}.decoder_arch"
         ATTN_LOGIT_SOFTCAPPING            = "{arch}.attn_logit_softcapping"
         ROUTER_LOGIT_SOFTCAPPING          = "{arch}.router_logit_softcapping"
         FINAL_LOGIT_SOFTCAPPING           = "{arch}.final_logit_softcapping"
@@ -3161,13 +3162,15 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.PLE_CONV1D,
         # MTP block: [fc_embedding | fc_hidden] as eh_proj, its own hyper-connection mixer as the head
         MODEL_TENSOR.NEXTN_EH_PROJ,
+        MODEL_TENSOR.NEXTN_EMBED_TOKENS,
         MODEL_TENSOR.NEXTN_ENORM,
         MODEL_TENSOR.NEXTN_HNORM,
+        MODEL_TENSOR.NEXTN_SHARED_HEAD_HEAD,
+        MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM,
         MODEL_TENSOR.NEXTN_HC_HEAD_NORM,
         MODEL_TENSOR.NEXTN_HC_HEAD_DOWN,
         MODEL_TENSOR.NEXTN_HC_HEAD_UP,
     ],
-    MODEL_ARCH.PLAMO: [
         MODEL_TENSOR.TOKEN_EMBD,
         MODEL_TENSOR.OUTPUT_NORM,
         MODEL_TENSOR.OUTPUT,

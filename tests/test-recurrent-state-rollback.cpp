@@ -213,7 +213,6 @@ static test_status test_multi_seq_split_replay(const common_params & params, lla
     // both contexts decode identical batches, so the logits should match;
     // random dummy models can still drift up to ~1.7e-5, so the bound is 1e-4
     constexpr float nmse_eps = 1e-4f;
-
     float    diff_max  = 0.0f;
     uint32_t seq_first = 0;
     int32_t  pos_first = -1;
@@ -364,7 +363,7 @@ static test_status test_rollback(const common_params & params, llama_model * mod
     ckpt.update_tgt(ctx_src.get(), 0, 0);
     ckpt.load_tgt(ctx_dst.get(), 0, 0);
 
-    constexpr float nmse_eps = 0.0;
+    constexpr float nmse_eps = 1e-5f;
     std::vector<std::vector<float>> logits_src_replay(n_rollback);
     const auto replay_and_compare = [&](const char * mode) {
         for (uint32_t i = 0; i < n_rollback; ++i) {

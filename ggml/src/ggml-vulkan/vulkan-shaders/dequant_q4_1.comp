@@ -18,12 +18,24 @@ void main() {
         return;
     }
 
-    const uint b_idx = 1024*i + 32*ir + 8*il;
+    const uint q_idx = 8*il;
+
+#ifdef DEQUANT_TRANSPOSE
+    // Fused dequant+transpose for FA quant-KV: per-head-contiguous f16 scratch.
+    // Source physical is [HS, NH, KV, NS] (p.M=HS, p.K=NH, p.stride_a=KV).
+    const uint HS = p.M, NH = p.K, KVn = p.stride_a;
+    const uint e0 = ib * 32;
+    const uint b_idx = (e0 % HS)
+                     + ((e0 / (HS * NH)) % KVn) * HS
+                     + ((e0 / HS) % NH) * (HS * KVn)
+                     + (e0 / (HS * NH * KVn)) * (HS * KVn * NH)
+                     + q_idx;
+#else
+    const uint b_idx = 1024*i + 32*ir + q_idx;
+#endif
 
     const float d = float(data_a[ib].d);
     const float m = float(data_a[ib].m);
-
-    const uint q_idx = 8*il;
 
     [[unroll]] for (uint l = 0; l < 8; ++l) {
         data_b[b_idx + l +  0] = D_TYPE(d * (data_a[ib].qs[q_idx + l] & 0xF) + m);

@@ -1,10 +1,6 @@
 #pragma once
 #include "ggml-vulkan-push-constants.h"
 
-inline std::ostream & operator<<(std::ostream & os, vk::Buffer buffer) {
-    return os << static_cast<VkBuffer>(buffer);
-}
-
 // shared globals
 extern ggml_backend_buffer_type_i ggml_backend_vk_buffer_type_interface;
 extern bool vk_memory_logger_enabled;
@@ -94,7 +90,7 @@ void deferred_memset(void * dst, uint32_t val, size_t size, std::vector<vk_stagi
 
 // matmul
 vk_pipeline ggml_vk_get_to_fp16(ggml_backend_vk_context * ctx, ggml_type type);
-void ggml_vk_matmul(ggml_backend_vk_context * ctx, vk_context& subctx, vk_pipeline& pipeline, vk_subbuffer&& a, vk_subbuffer&& b, vk_subbuffer&& d, vk_subbuffer&& split_k_buffer, uint32_t m, uint32_t n, uint32_t k, uint32_t stride_a, uint32_t stride_b, uint32_t stride_d, uint32_t batch_stride_a, uint32_t batch_stride_b, uint32_t batch_stride_d, uint32_t split_k, uint32_t batch, uint32_t ne02, uint32_t ne12, uint32_t broadcast2, uint32_t broadcast3, uint32_t padded_n, uint64_t b_col_bytes, uint64_t d_col_bytes);
+void ggml_vk_matmul(ggml_backend_vk_context * ctx, vk_context& subctx, vk_pipeline& pipeline, vk_subbuffer&& a, vk_subbuffer&& b, vk_subbuffer&& d, vk_subbuffer&& split_k_buffer, uint32_t m, uint32_t n, uint32_t k, uint32_t stride_a, uint32_t stride_b, uint32_t stride_d, uint32_t batch_stride_a, uint32_t batch_stride_b, uint32_t batch_stride_d, uint32_t split_k, uint32_t batch, uint32_t ne02, uint32_t ne12, uint32_t broadcast2, uint32_t broadcast3, uint32_t padded_n);
 bool ggml_vk_dim01_contiguous(const ggml_tensor * tensor);
 vk_pipeline ggml_vk_get_cpy_pipeline(ggml_backend_vk_context * ctx, const ggml_tensor * src, const ggml_tensor * dst, ggml_type to);
 vk_pipeline ggml_vk_get_quantize_pipeline(ggml_backend_vk_context * ctx, ggml_type type);
@@ -103,7 +99,7 @@ void ggml_vk_dsv4_hc_comb(ggml_backend_vk_context * ctx, vk_context& subctx, con
 void ggml_vk_dsv4_hc_pre(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * x, const ggml_tensor * weights, ggml_tensor * dst);
 void ggml_vk_dsv4_hc_post(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * x, const ggml_tensor * residual, const ggml_tensor * post, const ggml_tensor * comb, ggml_tensor * dst, const ggml_tensor * gate_scale_in = nullptr);
 void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx);
-bool ggml_vk_use_mul_mat_vec_id(const struct ggml_cgraph * cgraph, int node_idx);
+bool ggml_vk_use_mul_mat_vec_id(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx);
 void ggml_vk_mul_mat_id(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx);
 
 // flash-attn
@@ -237,18 +233,6 @@ ggml_backend_reg_t ggml_backend_vk_reg();
 
 // debug
 int64_t ggml_vk_get_op_batch_size(const ggml_tensor * op);
-#ifdef GGML_VULKAN_RUN_TESTS
-template <typename X_TYPE, typename Y_TYPE>
-void ggml_vk_test_matmul(ggml_backend_vk_context * ctx, size_t m, size_t n, size_t k, size_t batch, size_t num_it, int split_k, int shader_size);
-void ggml_vk_test_dequant(ggml_backend_vk_context * ctx, size_t ne, ggml_type quant);
-void ggml_vk_test_dequant_matmul(ggml_backend_vk_context * ctx, size_t m, size_t n, size_t k, size_t batch, size_t num_it, size_t split_k, size_t shader_size, ggml_type quant, bool mmq = false);
-#endif
-#ifdef GGML_VULKAN_CHECK_RESULTS
-extern size_t vk_skip_checks;
-extern size_t vk_output_tensor;
-void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, int tensor_idx);
-void ggml_vk_check_results_1(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, int tensor_idx);
-#endif
 
 // ggml-vulkan.cpp (residual)
 bool ggml_vk_lightning_indexer_k_type_supported(ggml_type type);

@@ -7,6 +7,8 @@
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-memory.h"
+#include "llama-memory-hybrid.h"
+#include "llama-memory-hybrid-iswa.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-moe-cache.h"
@@ -239,7 +241,7 @@ llama_context::llama_context(
         cparams.ctx_other = params.ctx_other;
     }
 
-    if (model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_DFLASH) {
+    if (model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_DFLASH || model.arch == LLM_ARCH_QWEN4EXP) {
         if (model.tok_embd == nullptr || model.output == nullptr) {
             if (params.ctx_other == nullptr) {
                 throw std::runtime_error(model.arch_name() + " requires ctx_other to be set (this warning is normal during memory fitting)");
@@ -1516,29 +1518,40 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
+    // LLAMA_GRAPH_TIMING=1: log where the CPU time of a decode goes (build, alloc, inputs)
+    static const bool graph_timing = getenv("LLAMA_GRAPH_TIMING") && atoi(getenv("LLAMA_GRAPH_TIMING")) != 0;
+    int64_t t_build = 0, t_alloc = 0, t_inputs = 0;
+    bool reused = false;
+
     if (!graph_reuse_disable && gf_res_prev_active == res && res->can_reuse(gparams)) {
+        reused = true;
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
-        // with pipeline parallelism, the previous graph_compute_async may still be running
-        // on the GPU. we must synchronize before set_inputs to avoid overwriting input tensors
-        // that the previous compute is still reading.
-        if (cparams.pipeline_parallel) {
-            ggml_backend_sched_synchronize(sched.get());
-        }
+        // a previously issued graph_compute_async may still be reading the graph inputs, so
+        // they cannot simply be overwritten here. this holds whenever a compute can still
+        // be in flight - under pipeline parallelism, and on a device that computes directly
+        // on the buffer the inputs live in, where no input copy is made to decouple the two.
+        ggml_backend_sched_prepare_inputs(sched.get());
 
         n_reused++;
     } else {
         gf_res_prev_active = nullptr;
         res->reset();
 
+        // The previous asynchronous graph may still read inputs or use graph allocations.
+        // We must synchronize before set_inputs to avoid overwriting input tensors
+        // that the previous compute is still reading. With pipeline parallelism,
+        // graph_compute_async runs on the GPU and the previous graph may still be running.
+        ggml_backend_sched_synchronize(sched.get());
+
         ggml_backend_sched_reset(sched.get());
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
 
-        //const auto t_start_us = ggml_time_us();
+        const auto t_build_us = ggml_time_us();
 
         gf = model.build_graph(gparams);
 
-        //LLAMA_LOG_INFO("graph build time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+        t_build = ggml_time_us() - t_build_us;
 
         if (!gf) {
             LLAMA_LOG_ERROR("%s: failed to initialize graph\n", __func__);
@@ -1546,23 +1559,30 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             return nullptr;
         }
 
+        const auto t_alloc_us = ggml_time_us();
         if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
             LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             ret = GGML_STATUS_ALLOC_FAILED;
             return nullptr;
         }
+        t_alloc = ggml_time_us() - t_alloc_us;
 
         gf_res_prev_active = res;
     }
 
     // set the input data for the input tensors
     {
-        //const auto t_start_us = ggml_time_us();
+        const auto t_inputs_us = ggml_time_us();
 
         // FIXME this call causes a crash if any model inputs were not used in the graph and were therefore not allocated
         res->set_inputs(&ubatch);
 
-        //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+        t_inputs = ggml_time_us() - t_inputs_us;
+        if (graph_timing) {
+            LLAMA_LOG_WARN("graph-timing: n_tokens=%3u gtype=%d reused=%d build=%.2f alloc=%.2f inputs=%.2f ms nodes=%d\n",
+                           ubatch.n_tokens, (int) gtype, (int) reused, t_build/1000.0, t_alloc/1000.0, t_inputs/1000.0,
+                           ggml_graph_n_nodes(res->get_gf()));
+        }
     }
 
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
@@ -3089,7 +3109,7 @@ public:
         for (const auto & winfo : winfos) {
             auto * buft = ggml_backend_buffer_get_type(winfo.tensor->buffer);
 
-            const int64_t n = winfo.size/ggml_element_size(winfo.tensor);
+            const int64_t n = (winfo.size / ggml_type_size(winfo.tensor->type)) * ggml_blck_size(winfo.tensor->type);
 
             auto & mbuf = mbufs_new[buft];
 
@@ -3220,7 +3240,7 @@ public:
         for (const auto & rinfo : rinfos) {
             auto * buft = ggml_backend_buffer_get_type(rinfo.tensor->buffer);
 
-            const int64_t n = rinfo.size/ggml_element_size(rinfo.tensor);
+            const int64_t n = (rinfo.size / ggml_type_size(rinfo.tensor->type)) * ggml_blck_size(rinfo.tensor->type);
 
             auto & mbuf = mbufs_new[buft];
 
@@ -3287,8 +3307,7 @@ public:
 
                 const size_t n_copy = std::min(src_size - src_off, dst_size - dst_off);
 
-                const size_t   el   = ggml_element_size(src_t);
-                const int64_t n_el = (int64_t) (n_copy / el);
+                const int64_t n_el = (n_copy / ggml_type_size(src_t->type)) * ggml_blck_size(src_t->type);
 
                 auto * src_v = ggml_view_1d(ctx_scratch, src_t, n_el, src_off);
                 ggml_backend_view_init(src_v);
@@ -4398,6 +4417,31 @@ bool llama_memory_seq_rm(
         return true;
     }
 
+    return mem->seq_rm(seq_id, p0, p1);
+}
+
+bool llama_memory_seq_rm_attn_only(
+        llama_memory_t mem,
+          llama_seq_id seq_id,
+             llama_pos p0,
+             llama_pos p1) {
+    if (!mem) {
+        return true;
+    }
+
+    // For hybrid models (including ISWA), use the attention-only removal
+    // that preserves recurrent state
+    auto * mem_hybrid = dynamic_cast<llama_memory_hybrid *>(mem);
+    if (mem_hybrid) {
+        return mem_hybrid->seq_rm_attn_only(seq_id, p0, p1);
+    }
+
+    auto * mem_hybrid_iswa = dynamic_cast<llama_memory_hybrid_iswa *>(mem);
+    if (mem_hybrid_iswa) {
+        return mem_hybrid_iswa->seq_rm_attn_only(seq_id, p0, p1);
+    }
+
+    // For non-hybrid models, fall back to regular seq_rm
     return mem->seq_rm(seq_id, p0, p1);
 }
 

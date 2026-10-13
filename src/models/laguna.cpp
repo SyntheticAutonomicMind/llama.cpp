@@ -170,6 +170,9 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
     const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 
     for (int il = 0; il < n_layer; ++il) {
+        // residual-stream capture for speculative drafters (EAGLE3 / DFlash)
+        res->t_layer_inp[il] = inpL;
+
         const bool    is_swa_il   = hparams.is_swa(il);
         const int64_t n_head_il   = hparams.n_head(il);
         const int64_t n_head_kv_il = hparams.n_head_kv(il);
@@ -259,7 +262,7 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
             cb(cur, "attn_o_proj", il);
         }
 
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == n_layer - 1 && inp_out_ids && cparams.embeddings_nextn_masked) {
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -318,7 +321,21 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
         inpL = cur;
     }
 
+   // expose the post-final-layer hidden state (before the final output
+    // norm) as t_h_nextn, so DFlash/EAGLE3 draft models can read it via
+    // llama_get_embeddings_nextn().  target_layer_ids that include
+    // n_layer_tgt expect this buffer; without it the emb_nextn output
+    // is never populated and the draft encoder receives stale data.
+    //
+    // t_h_nextn keeps all token rows (matching the unmasked emb_nextn
+    // buffer size).  The inp_out_ids crop is deferred to the logits path
+    // below so t_h_nextn is never smaller than ubatch.n_tokens.
+    res->t_h_nextn = inpL;
+
     cur = inpL;
+    if (!cparams.embeddings_nextn_masked && inp_out_ids) {
+        cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+    }
     cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
     cb(cur, "result_norm", -1);
     res->t_embd = cur;

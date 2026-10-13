@@ -3386,7 +3386,7 @@ private:
                                 llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id));
 
                         if (use_ckpt_dft) {
-                            slot.spec_ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                            slot.spec_ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
                         }
 
                         slot.spec_prompt = slot.prompt.tokens.get_text_tokens();
@@ -3430,7 +3430,8 @@ private:
 
             if (ctx_dft) {
                 if (use_ckpt_dft) {
-                    GGML_ASSERT(ckpt.load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY));
+                    ckpt.load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
+unstable
                 }
 
                 if (!llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, ckpt.pos_max + 1, -1)) {
@@ -3449,7 +3450,7 @@ private:
                 if (use_ckpt_tgt) {
                     //const int64_t t_start = ggml_time_us();
 
-                    ckpt.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                    ckpt.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
 
                     //const int64_t t_total = ggml_time_us() - t_start;
                     //printf("checkpoint total: %f ms\n", t_total / 1000.0);
@@ -3461,7 +3462,7 @@ private:
                 }
 
                 if (use_ckpt_dft) {
-                    ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                    ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
                 }
             }
         });
@@ -3841,12 +3842,18 @@ private:
                     //       the tokens added to the batch below
                     slot.print_timings_pp();
 
-                    // truncate any tokens that are beyond n_past for this slot
+                    // truncate any tokens that are beyond n_past for this slot.
+                    // use seq_rm_attn_only for hybrid/recurrent memory types: the
+                    // standard seq_rm routes through mem_recr->seq_rm whose
+                    // n_rs_seq rollback path can fail when the checkpoint's
+                    // position range extends past n_past. seq_rm_attn_only
+                    // clears attention cells AND stale position tracking in
+                    // the recurrent cache without touching R/S tensor data.
                     const llama_pos p0 = slot.prompt.tokens.pos_next();
 
-                    SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
+                    SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm_attn_only [%d, end)\n", slot.prompt.n_tokens(), p0);
 
-                    slot.mem.seq_rm(slot.id, p0, -1);
+                    slot.mem.seq_rm_attn_only(slot.id, p0, -1);
 
                     // shared prompt prefix: once it is processed, the children continue from it with their own prompt
                     bool wait_shared = false;
@@ -4425,20 +4432,22 @@ private:
                 GGML_ASSERT(slot.spec_i_batch.size() == n_draft + 1);
                 GGML_ASSERT(slot.spec_draft_q.empty() || (slot.spec_draft_q.size() == slot.spec_draft.size()));
                 const auto & synth_probs = common_speculative_get_synth_probs(spec.get());
-
-                // drafters that fill no distribution fall back here
-                const bool use_rejection = slot.use_spec_rejection() && !slot.spec_draft_q.empty();
-
                 std::vector<llama_token> accepted;
                 if (!synth_probs.empty()) {
-                    // synthetic acceptance replaces verification entirely, so it comes first
                     accepted = server_sample_and_accept_synth(
                             slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft,
                             synth_probs, slot.spec_synth_rng, slot.spec_is_replay);
-                } else if (slot.spec_is_replay && slot.use_spec_rejection()) {
-                    accepted = server_accept_replay(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
-                } else if (use_rejection) {
-                    accepted = common_sampler_sample_and_accept_n_rejection(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft, slot.spec_draft_q);
+                } else if (slot.spec_is_replay) {
+                    // replayed tokens were accepted before the restore; re-verifying them can
+                    // disagree when logits depend on batch shape, and each disagreement restores
+                    // the same checkpoint again - the slot stops making progress
+                    accepted = slot.spec_draft;
+                    for (const llama_token id : accepted) {
+                        common_sampler_accept(slot.smpl.get(), id, true);
+                    }
+                    accepted.push_back(common_sampler_sample(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch.back()));
+                    common_sampler_accept(slot.smpl.get(), accepted.back(), true);
+unstable
                 } else {
                     accepted = common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
                 }
@@ -4467,10 +4476,11 @@ private:
 
                         SLT_DBG(slot, "restoring speculative checkpoint (pos_min = %d, pos_max = %d, size = %zu)\n", ckpt.pos_min, ckpt.pos_max, ckpt.size());
 
-                        GGML_ASSERT(ckpt.load_tgt(slot.ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY));
+                        ckpt.load_tgt(slot.ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
 
                         if (slot.ctx_dft) {
-                            GGML_ASSERT(ckpt.load_dft(slot.ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY));
+                            ckpt.load_dft(slot.ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
+unstable
                         }
 
                         slot.mem.seq_rm(slot.id, ckpt.pos_max + 1, -1);

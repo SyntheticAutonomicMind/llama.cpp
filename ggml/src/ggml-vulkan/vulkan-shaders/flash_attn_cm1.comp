@@ -44,8 +44,14 @@ shared float tmpsh[row_split];
 const uint32_t qstride = HSK_pad / 4 + 2;
 shared FLOAT_TYPEV4 Qf[Br * qstride];
 
-const uint psh_stride = Br / 4 + 2;
-shared FLOAT_TYPEV4 Psh[Bc * psh_stride];
+// P is stored query-major (row = Br, col = Bc/4 vec4s). The stride must cover
+// the column dimension (ceil(Bc/4) + padding), not the row dimension.
+// Using Br/4 as the stride was a bug: with Br=16 and Bc=64 the stride was 6
+// but the max column index was Bc/4-1 = 15, so writes reached row 15 * 6 + 15 = 105
+// into a buffer of only 16 * 6 = 96 elements - 9 words out of bounds, corrupting
+// shared memory and producing garbage attention output.
+const uint psh_stride = Bc / 4 + 2;
+shared FLOAT_TYPEV4 Psh[Br * psh_stride];
 
 // Avoid padding for hsk==256 to make it fit in 48KB shmem.
 const uint32_t sfshstride = (HSK <= 128) ? (Br / 4 + 2) : Br / 4;
@@ -395,15 +401,19 @@ void main() {
 
             [[unroll]] for (uint32_t r = 0; r < rows_per_thread; r += 4) {
                 const uint row = tile_row(r);
+                const uint pcol_vec  = col / 4;
+                const uint pcol_comp = col % 4;
                 if (KV_bounds_check && j * Bc + col >= KV) {
-                    Psh[col * psh_stride + row / 4] = FLOAT_TYPEV4(0.0f);
+                    [[unroll]] for (uint32_t vec_idx = 0; vec_idx < 4; ++vec_idx) {
+                        Psh[(row + vec_idx) * psh_stride + pcol_vec][pcol_comp] = FLOAT_TYPE(0.0f);
+                    }
                 } else {
                     const vec4 mfvec = vec4(Mf[r], Mf[r + 1], Mf[r + 2], Mf[r + 3]);
                     const FLOAT_TYPEV4 Pf = FLOAT_TYPEV4(exp(vec4(sfsh[row / 4 + col * sfshstride]) - mfvec));
                     [[unroll]] for (uint32_t vec_idx = 0; vec_idx < 4; ++vec_idx) {
                         Lf[r + vec_idx] += Pf[vec_idx];
+                        Psh[(row + vec_idx) * psh_stride + pcol_vec][pcol_comp] = Pf[vec_idx];
                     }
-                    Psh[col * psh_stride + row / 4] = Pf;
                 }
             }
         }
@@ -437,6 +447,13 @@ void main() {
         barrier();
 
         const uint num_hsv_tiles = (HSV + MatBc * row_split - 1) / (MatBc * row_split); // round up
+
+        // Psh is not written again until the next KV block, so the P fragments are the same
+        // for every hsv_tile. Load them once instead of re-reading LDS per tile.
+        coopmat<FLOAT_TYPE, gl_ScopeSubgroup, MatBc, 16, gl_MatrixUseA> PMat[Bc / MatBc];
+        [[unroll]] for (uint32_t bc_chunk = 0; bc_chunk < Bc / MatBc; ++bc_chunk) {
+            coopMatLoad(PMat[bc_chunk], Psh, bc_chunk * (MatBc / 4), psh_stride, gl_CooperativeMatrixLayoutRowMajor);
+        }
 
         // Each subgroup handles HSV/4 columns
         [[unroll]] for (uint32_t hsv_tile = 0; hsv_tile < num_hsv_tiles; ++hsv_tile) {
@@ -492,8 +509,6 @@ void main() {
 
             if (hsv_offset < HSV_pad) {
                 [[unroll]] for (uint32_t bc_chunk = 0; bc_chunk < Bc / MatBc; ++bc_chunk) {
-                    coopMatLoad(KMat, Psh, bc_chunk * MatBc * psh_stride, psh_stride, gl_CooperativeMatrixLayoutColumnMajor);
-
                     if (SHMEM_STAGING == 0) {
                     if (!USE_DECODE_V && !KV_bounds_check && !USE_SPARSE) {
                         // F16/BF16 values can be loaded directly from global memory
@@ -509,7 +524,7 @@ void main() {
                         coopMatLoad(QMat, kvsh, v_tile_offset, kvsh_stride, gl_CooperativeMatrixLayoutRowMajor);
                     }
 
-                    PVMat = coopMatMulAdd(KMat, QMat, PVMat);
+                    PVMat = coopMatMulAdd(PMat[bc_chunk], QMat, PVMat);
                 }
 
                 // Store PVMat to pvsh and load into Of

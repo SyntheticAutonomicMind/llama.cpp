@@ -443,14 +443,14 @@ static bool test_seq_cp_device(struct llama_model * model, const struct common_p
 // - save the seq 1 state, free the interleaved seq 0 cells, and restore via the given io path
 // - the restore destination is non-contiguous: scatter reads are batched per contiguous run
 // - save again on the host and compare the two blobs byte for byte
-static bool test_seq_cp_scatter(struct llama_model * model, const struct common_params & params, const llama_tokens & tokens, int test_num, bool on_device) {
+static bool test_seq_cp_scatter(struct llama_model * model, const struct common_params & params, const llama_tokens & tokens, int test_num, bool on_device, bool compact = false) {
     auto params_ctx = common_context_params_to_llama(params);
     params_ctx.n_ctx      = 256;
     params_ctx.n_seq_max  = 2;
     params_ctx.kv_unified = true;
     auto ctx = llama_context_ptr{llama_init_from_model(model, params_ctx)};
 
-    LOGV(LOG_LEVEL_INFO, "\n=== Test %d: seq copy (%s, scatter) ===\n", test_num, on_device ? "device" : "host");
+    LOG("\n=== Test %d: seq copy (%s, %s) ===\n", test_num, on_device ? "device" : "host", compact ? "scatter to compact" : "scatter");
 
     const uint32_t flags = on_device ? LLAMA_STATE_SEQ_FLAGS_ON_DEVICE : LLAMA_STATE_SEQ_FLAGS_NONE;
 
@@ -506,6 +506,11 @@ static bool test_seq_cp_scatter(struct llama_model * model, const struct common_
     if (!llama_memory_seq_rm(llama_get_memory(ctx.get()), 0, -1, -1)) {
         LOG_ERR("%s: failed to remove sequence 0\n", __func__);
         return false;
+    }
+
+    if (compact) {
+        // Saved ranges [2, 1] must restore into one contiguous range, including quantized KV blocks.
+        llama_memory_clear(llama_get_memory(ctx.get()), true);
     }
 
     // restore via the io path under test
@@ -843,7 +848,7 @@ struct test_suite {
 
 // column headers for the --models table, one per test, in the order they are run
 static const std::vector<const char *> test_names = {
-    "baseline", "seq_rm", "state_load", "cp_h", "cp_d", "cp_h_s", "cp_d_s", "rt", "rf", "rot",
+    "baseline", "seq_rm", "state_load", "cp_h", "cp_d", "cp_h_s", "cp_d_s", "rt", "rf", "cp_d_c", "rot",
 };
 
 // Run the full save/load test suite (tests 1-10) for a single model.
@@ -925,7 +930,10 @@ static test_suite run_save_load_tests_for_model(const std::string & model_path, 
     // Test 9: state restore failure
     suite.results.push_back(test_state_restore_failure(model, params, tokens) ? test_status::PASS : test_status::FAIL);
 
-    // Test 10: state rotation
+    // Test 10: on-device restore with different source and destination chunking (compact scatter)
+    suite.results.push_back(test_seq_cp_scatter(model, params, tokens, 10, true, true) ? test_status::PASS : test_status::FAIL);
+
+    // Test 11: state rotation
     suite.results.push_back(test_state_rotation(model, params) ? test_status::PASS : test_status::FAIL);
 
     return suite;

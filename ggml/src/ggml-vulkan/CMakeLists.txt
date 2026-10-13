@@ -73,6 +73,8 @@ if (Vulkan_FOUND)
     set_target_properties(ggml-vulkan PROPERTIES
                           CXX_VISIBILITY_PRESET hidden
                           VISIBILITY_INLINES_HIDDEN ON)
+    # Export logging variable so ggml_log calls in the f16-B path are compiled in
+    target_compile_definitions(ggml-vulkan PRIVATE GGML_USE_LOGGING)
 
     set(VULKAN_SHADER_GEN_CMAKE_ARGS "")
 
@@ -121,6 +123,13 @@ if (Vulkan_FOUND)
 
     target_link_libraries(ggml-vulkan PRIVATE Vulkan::Vulkan)
     target_include_directories(ggml-vulkan PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
+    # FA quant-KV dequant-scratch gate calls common::host_available_ram().
+    # host-ram.cpp is in common/, but linking ggml-vulkan against llama-common creates a
+    # cyclic dep (llama-common already depends on ggml-vulkan). Compile the single TU
+    # directly into ggml-vulkan instead. The function is small and self-contained.
+    target_include_directories(ggml-vulkan PRIVATE ${CMAKE_SOURCE_DIR}/common)
+    target_sources(ggml-vulkan PRIVATE ${CMAKE_SOURCE_DIR}/common/host-ram.cpp)
 
     # Workaround to the "can't dereference invalidated vector iterator" bug in clang-cl debug build
     # Possibly relevant: https://stackoverflow.com/questions/74748276/visual-studio-no-displays-the-correct-length-of-stdvector

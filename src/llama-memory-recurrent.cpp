@@ -262,6 +262,82 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
     return true;
 }
 
+bool llama_memory_recurrent::seq_rm_positions_only(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    if (p0 < 0) {
+        p0 = 0;
+    }
+
+    if (p1 < 0) {
+        p1 = std::numeric_limits<llama_pos>::max();
+    }
+
+    // remove seq_id from cells with positions in [p0, p1), bypassing the
+    // n_rs_seq rollback path in seq_rm() - which can fail (return false)
+    // when rollback would exceed n_rs_seq on mamba/GDN-style models.
+    //
+    // purpose: after a hybrid-model checkpoint restore loads full
+    // recurrent state with positions extending past the checkpoint's
+    // logical end, the seq_pos_min/max reporting still reflects those
+    // stale positions. llama_batch_init validation fails because the
+    // new batch start is not >= seq_pos_max + 1.
+    //
+    // this function does NOT touch cell.tail or cell.head, but it DOES
+    // clear cell.pos/src and decrement used when cells become empty
+    // (mirroring seq_rm's behavior). leaving stale pos in empty cells
+    // causes find_slot() to emit spurious "non-consecutive token
+    // position" warnings when the cell is reused at a different position.
+    //
+    // returns true unconditionally - no rollback path to fail.
+    for (uint32_t i = 0; i < size; ++i) {
+        if (cells[i].pos >= p0 && cells[i].pos < p1) {
+            if (seq_id < 0) {
+                cells[i].seq_id.clear();
+            } else if (cells[i].has_seq_id(seq_id)) {
+                cells[i].seq_id.erase(seq_id);
+            }
+        }
+    }
+
+    // Clear pos/src and decrement used when cells become empty, mirroring
+    // the behavior in seq_rm(). Without this, empty cells retain stale
+    // pos values from previous sequences, causing find_slot() to emit
+    // spurious "non-consecutive token position" warnings when the cell
+    // is reused with a different position. This happens on qwen4exp
+    // models when seq_rm_attn_only clears positions during context
+    // trimming or do_reset, leaving empty cells with stale pos (e.g.,
+    // the last token position from the prior task).
+    for (uint32_t i = 0; i < size; ++i) {
+        if (cells[i].pos >= p0 && cells[i].pos < p1) {
+            if (cells[i].is_empty() && cells[i].pos >= 0) {
+                used--;
+                cells[i].pos = -1;
+                cells[i].src = -1;
+            }
+        }
+    }
+
+    // Update the per-seq tail pointer to reflect any cleared cells past
+    // the new boundary.
+    if (seq_id >= 0 && (uint32_t) seq_id < size) {
+        int32_t & tail_id = cells[seq_id].tail;
+        if (tail_id >= 0 && !cells[tail_id].has_seq_id(seq_id)) {
+            int32_t new_tail = -1;
+            llama_pos new_tail_pos = -1;
+            for (uint32_t i = 0; i < size; ++i) {
+                if (cells[i].has_seq_id(seq_id)) {
+                    if (cells[i].pos > new_tail_pos) {
+                        new_tail_pos = cells[i].pos;
+                        new_tail = (int32_t) i;
+                    }
+                }
+            }
+            tail_id = new_tail;
+        }
+    }
+
+    return true;
+}
+
 void llama_memory_recurrent::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
     if (seq_id_src == seq_id_dst) {
         return;

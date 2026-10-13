@@ -209,8 +209,6 @@ static bool is_pow2(uint32_t x) { return x > 1 && (x & (x-1)) == 0; }
 
 #define VK_VENDOR_ID_QUALCOMM 0x5143
 
-#define VK_VENDOR_ID_SAMSUNG 0x144d
-
 #define VK_DEVICE_DESCRIPTOR_POOL_SIZE 256
 
 #define VK_CHECK(err, msg, dev)                                     \
@@ -391,6 +389,7 @@ enum vk_device_architecture {
     AMD_RDNA2,
     AMD_RDNA3,
     AMD_RDNA4,
+    AMD_RDNA3_5,
     INTEL_XE1,
     INTEL_XE2,
     NVIDIA_PRE_TURING,
@@ -503,7 +502,8 @@ static constexpr uint32_t num_argsort_pipelines = 11;
 
 static constexpr uint32_t num_topk_moe_pipelines = 10;
 
-static constexpr uint32_t num_topk_pipelines = 11;
+// CachyLLama: widened from 11 to 14 for QSA indexer gather (qwen4exp QSA top_k with n_sel=2051)
+static constexpr uint32_t num_topk_pipelines = 14;
 
 static constexpr std::initializer_list<ggml_op> topk_moe_early_softmax_norm{ GGML_OP_SOFT_MAX, GGML_OP_RESHAPE,  GGML_OP_ARGSORT,
                                                                              GGML_OP_VIEW,     GGML_OP_GET_ROWS, GGML_OP_RESHAPE,
@@ -732,8 +732,12 @@ struct vk_device_struct {
     bool vulkan_memory_model;
 
     bool add_rms_fusion;
+    bool fa_no_scratch_transpose;       // GGML_VK_NO_FA_SCRATCH_TRANSPOSE
+    bool fa_scratch_force;                // GGML_VK_FA_SCRATCH_FORCE
+    uint32_t fa_scratch_safety_bytes;   // extra headroom reserved on UMA
     uint32_t partials_binding_alignment;
     uint32_t max_nodes_per_submit;
+    uint64_t max_bytes_per_submit;
 
     bool shader_64b_indexing;
 
@@ -845,6 +849,7 @@ struct vk_device_struct {
 
     vk_pipeline pipeline_add_id_f32;
 
+    vk_pipeline pipeline_concat_transpose_i32;
     vk_pipeline pipeline_concat_i8, pipeline_concat_i16, pipeline_concat_i32, pipeline_concat_i64;
     vk_pipeline pipeline_upscale_nearest_f32, pipeline_upscale_bilinear_f32, pipeline_upscale_bicubic_f32, pipeline_upscale_bilinear_antialias_f32;
     vk_pipeline pipeline_scale_f32;
@@ -857,8 +862,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_roll_f32;
     vk_pipeline pipeline_repeat_i32, pipeline_repeat_back_f32;
     vk_pipeline pipeline_repeat_i16;
-    vk_pipeline pipeline_cpy_f32_f32, pipeline_cpy_f32_f16, pipeline_cpy_f16_f16, pipeline_cpy_f16_f32, pipeline_cpy_f32_bf16, pipeline_cpy_bf16_f32, pipeline_cpy_f32_i32, pipeline_cpy_i32_f32;
-    vk_pipeline pipeline_contig_cpy_f32_f32, pipeline_contig_cpy_f32_f16, pipeline_contig_cpy_f16_f16, pipeline_contig_cpy_f16_f32, pipeline_contig_cpy_f32_bf16, pipeline_contig_cpy_bf16_f32, pipeline_contig_cpy_f32_i32, pipeline_contig_cpy_i32_f32;
+    vk_pipeline pipeline_cpy_f32_f32, pipeline_cpy_f32_f16, pipeline_cpy_f16_f16, pipeline_cpy_f16_f32, pipeline_cpy_f32_bf16, pipeline_cpy_bf16_f32, pipeline_cpy_bf16_f16, pipeline_cpy_f32_i32, pipeline_cpy_i32_f32;
+    vk_pipeline pipeline_contig_cpy_f32_f32, pipeline_contig_cpy_f32_f16, pipeline_contig_cpy_f16_f16, pipeline_contig_cpy_f16_f32, pipeline_contig_cpy_f32_bf16, pipeline_contig_cpy_bf16_f32, pipeline_contig_cpy_bf16_f16, pipeline_contig_cpy_f32_i32, pipeline_contig_cpy_i32_f32;
     vk_pipeline pipeline_cpy_f32_quant[GGML_TYPE_COUNT];
     vk_pipeline pipeline_cpy_quant_f32[GGML_TYPE_COUNT];
     vk_pipeline pipeline_cpy_transpose_16, pipeline_cpy_transpose_32;
@@ -984,6 +989,12 @@ struct vk_device_struct {
     vk_pipeline pipeline_rwkv_wkv7_f32;
     vk_pipeline pipeline_gated_linear_attn_f32;
     vk_pipeline pipeline_lightning_indexer_f32[GGML_TYPE_COUNT];
+    // CachyLLama: coopmat variants of the lightning indexer for tensor-core acceleration on
+    // prefill (n_batch > 1) and decode (n_batch == 1). Both are f16 K-cache, N_HEAD=64,
+    // HEAD_SIZE=128 only - anything else falls back to pipeline_lightning_indexer_f32 above.
+    // Pipeline nullptr when coopmat1 16x16x16 f16-acc + subgroup_size_control aren't both available.
+    vk_pipeline pipeline_lightning_indexer_cm_f16;
+    vk_pipeline pipeline_lightning_indexer_decode_cm_f16;
     // [size_idx][kda] where size_idx: 0=d16, 1=d32, 2=d64, 3=d128
     vk_pipeline pipeline_gated_delta_net[4][2];
     vk_pipeline pipeline_ssm_scan_f32_d128;
@@ -1217,6 +1228,13 @@ class vk_perf_logger {
         timings[name].push_back(time);
     }
 
+    // Log a sub-node interval under a caller-supplied name. Used for work a node's handler
+    // dispatches before the op itself (e.g. the FA K/V contiguize/dequant pass), which would
+    // otherwise be billed to the op and invisible. No flops: these move bytes, not math.
+    void log_timing_named(const char * name, uint64_t time) {
+        timings[std::string(name)].push_back(time);
+    }
+
     void log_timing(const std::vector<ggml_tensor *> &nodes, const std::vector<const char *> &names, uint64_t time) {
         uint64_t total_flops = 0;
         std::string name;
@@ -1314,6 +1332,8 @@ struct ggml_backend_vk_context {
     std::vector<int> query_fusion_node_count;
     std::vector<ggml_tensor *> query_nodes;
     std::vector<int> query_node_idx;
+    // non-null => this query slot closes a sub-node interval logged under this literal name.
+    std::vector<const char *> query_sub_names;
     int32_t num_queries {};
     int32_t query_idx {};
 };
@@ -1453,3 +1473,4 @@ struct ggml_backend_vk_device_context {
     std::string pci_bus_id;
     int op_offload_min_batch_size;
 };
+

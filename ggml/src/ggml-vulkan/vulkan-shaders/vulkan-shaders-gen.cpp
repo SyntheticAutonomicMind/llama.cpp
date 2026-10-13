@@ -480,12 +480,11 @@ void matmul_shaders(bool fp16, MatMulIdType matmul_id_type, bool coopmat, bool c
         base_dict["FLOAT16"] = "1";
     }
 
-    base_dict["ACC_TYPE"     ] = f16acc ? "float16_t" : "float";
-    base_dict["ACC_TYPEV2"   ] = f16acc ? "f16vec2"   : "vec2";
+    base_dict["ACC_TYPE"  ] = f16acc ? "float16_t" : "float";
+    base_dict["ACC_TYPEV2"] = f16acc ? "f16vec2"   : "vec2";
     base_dict["ACC_TYPE_VEC4"] = f16acc ? "f16vec4"   : "vec4";
     if (f16acc) {
         base_dict["ACC_TYPE_MAX"] = "float16_t(65504.0)";
-        base_dict["ACC_F16"] = "1";
     }
 
     if (coopmat) {
@@ -830,8 +829,14 @@ void process_shaders() {
             string_to_spv("dequant_" + tname, "dequant_" + tname + ".comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float16_t"}}));
         }
         // Fused dequant+transpose variant for FA quant-KV (per-head-contiguous f16 scratch).
-        if (tname == "q8_0") {
+        // All four are bit-exact equal to the native FA f16 path once dequant-once is engaged.
+        if (tname == "q8_0" || tname == "q4_0" || tname == "q4_1" || tname == "q5_0" || tname == "q5_1") {
             string_to_spv("dequant_" + tname + "_transpose", "dequant_" + tname + ".comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float16_t"}, {"DEQUANT_TRANSPOSE", "1"}}));
+        }
+
+        // Strided-copy counterpart for FA f16 KV (contiguize pass). GGML_VK_FA_KV_CONTIG gates it.
+        if (tname == "f16") {
+            string_to_spv("dequant_f16_transpose", "dequant_f16_transpose.comp", {});
         }
 
         shader = (tname == "f32" || tname == "f16" || tname == "bf16") ? "get_rows.comp" : "get_rows_quant.comp";
@@ -870,6 +875,7 @@ void process_shaders() {
     string_to_spv("cpy_f16_f32", "copy.comp", {{"A_TYPE", "float16_t"}, {"D_TYPE", "float"}, {"OPTIMIZATION_ERROR_WORKAROUND", "1"}});
     string_to_spv("cpy_f32_bf16","copy.comp", {{"A_TYPE", "float"}, {"D_TYPE", "uint16_t"}, {"DATA_D_BF16", "1"}});
     string_to_spv("cpy_bf16_f32","copy.comp", {{"A_TYPE", "uint16_t"}, {"D_TYPE", "float"}, {"DATA_A_BF16", "1"}});
+    string_to_spv("cpy_bf16_f16","copy.comp", {{"A_TYPE", "uint16_t"}, {"D_TYPE", "float16_t"}, {"DATA_A_BF16", "1"}});
     string_to_spv("contig_cpy_f32_f32", "contig_copy.comp", {{"A_TYPE", "float"}, {"D_TYPE", "float"}});
     string_to_spv("contig_cpy_f32_i32", "contig_copy.comp", {{"A_TYPE", "float"}, {"D_TYPE", "int"}});
     string_to_spv("contig_cpy_i32_f32", "contig_copy.comp", {{"A_TYPE", "int"}, {"D_TYPE", "float"}});
@@ -878,6 +884,7 @@ void process_shaders() {
     string_to_spv("contig_cpy_f16_f32", "contig_copy.comp", {{"A_TYPE", "float16_t"}, {"D_TYPE", "float"}, {"OPTIMIZATION_ERROR_WORKAROUND", "1"}});
     string_to_spv("contig_cpy_f32_bf16","contig_copy.comp",{{"A_TYPE", "float"}, {"D_TYPE", "uint16_t"}, {"DATA_D_BF16", "1"}});
     string_to_spv("contig_cpy_bf16_f32","contig_copy.comp",{{"A_TYPE", "uint16_t"}, {"D_TYPE", "float"}, {"DATA_A_BF16", "1"}});
+    string_to_spv("contig_cpy_bf16_f16","contig_copy.comp",{{"A_TYPE", "uint16_t"}, {"D_TYPE", "float16_t"}, {"DATA_A_BF16", "1"}});
     string_to_spv("cpy_f32_i32", "copy.comp", {{"A_TYPE", "float"}, {"D_TYPE", "int"}});
     string_to_spv("cpy_i32_f32", "copy.comp", {{"A_TYPE", "int"}, {"D_TYPE", "float"}});
 
@@ -963,6 +970,8 @@ void process_shaders() {
     string_to_spv("concat_i16", "concat.comp", {{"A_TYPE", "uint16_t"}, {"B_TYPE", "uint16_t"}, {"D_TYPE", "uint16_t"}});
     string_to_spv("concat_i32", "concat.comp", {{"A_TYPE", "uint"}, {"B_TYPE", "uint"}, {"D_TYPE", "uint"}});
     string_to_spv("concat_i64", "concat.comp", {{"A_TYPE", "uvec2"}, {"B_TYPE", "uvec2"}, {"D_TYPE", "uvec2"}});
+    // CachyLLama: tiled-transpose kernel for dim-0 concat with transposed src1
+    string_to_spv("concat_transpose_i32", "concat_transpose.comp", {{"A_TYPE", "uint"}, {"B_TYPE", "uint"}, {"D_TYPE", "uint"}});
 
     string_to_spv("upscale_f32", "upscale.comp", {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}});
 
@@ -1116,6 +1125,11 @@ void process_shaders() {
 
     string_to_spv("count_experts", "count_experts.comp", merge_maps(base_dict, {{"A_TYPE", "uint"}, {"D_TYPE", "uint"}}));
     string_to_spv("count_experts_subgroup", "count_experts.comp", merge_maps(base_dict, {{"A_TYPE", "uint"}, {"D_TYPE", "uint"}, {"USE_SUBGROUPS", "1"}}));
+    // CachyLLama: grouped-GEMM row-list prepass pipeline and top-k-aware sparse FA shader
+    // (C2/Gaetan Puleo) - the top-k shader is compiled but dispatch requires the
+    // ggml_flash_attn_ext_add_top_k API change + DSv4 model integration.
+    string_to_spv("mmid_row_lists", "mmid_row_lists.comp", {});
+    string_to_spv("flash_attn_top_k_f16", "flash_attn_top_k.comp", {});
 
     for (std::string dim_str : {"", "_3d"}) {
         for (bool bda : {false, true}) {
@@ -1150,6 +1164,12 @@ void process_shaders() {
     // K quant type is selected at runtime via the FaTypeK spec constant.
     std::map<std::string, std::string> li_dict = {{"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV4", "vec4"}, {"DATA_A_IQ4_NL", "1"}};
     string_to_spv("lightning_indexer_f32", "lightning_indexer.comp", li_dict);
+    string_to_spv("lightning_indexer_subgroup_f32", "lightning_indexer.comp", merge_maps(li_dict, {{"USE_SUBGROUP_ADD", "1"}}));
+    // CachyLLama: coopmat variants of the lightning indexer (prefill + decode paths)
+    // for Head_SIZE=128, N_HEAD=64, K=F16 only. Dispatch falls back to the scalar
+    // f32 path when pre-conditions don't match. See ggml-vulkan.cpp.
+    string_to_spv("lightning_indexer_cm_f16", "lightning_indexer_cm.comp", {});
+    string_to_spv("lightning_indexer_decode_cm_f16", "lightning_indexer_decode_cm.comp", {});
 
     string_to_spv("rwkv_wkv7_f32", "wkv7.comp", merge_maps(base_dict, {{"A_TYPE", "float"}}));
 
