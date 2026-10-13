@@ -3343,6 +3343,14 @@ private:
         std::vector<server_slot *> generating;
         std::vector<server_slot *> drafting;
 
+        // --spec-draft-max-slots: with many slots generating, start no new drafts
+        int n_generating = 0;
+        iterate(slots, [&](server_slot & slot) {
+            n_generating += slot.state == SLOT_STATE_GENERATING;
+        });
+        const int  spec_max_slots = params_base.speculative.draft.max_slots;
+        const bool spec_new_ok    = spec_max_slots <= 0 || n_generating <= spec_max_slots;
+
         // determine which slots are generating and drafting
         iterate(slots, [&](server_slot & slot) {
             if (slot.state != SLOT_STATE_GENERATING) {
@@ -3377,7 +3385,7 @@ private:
                         if (use_ckpt_tgt) {
                             GGML_ASSERT(!slot.spec_ckpt.empty());
                         }
-                    } else {
+                    } else if (spec_new_ok) {
                         GGML_ASSERT(slot.spec_i_batch.empty());
 
                         slot.spec_ckpt.update_pos(
@@ -3431,7 +3439,6 @@ private:
             if (ctx_dft) {
                 if (use_ckpt_dft) {
                     ckpt.load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
-unstable
                 }
 
                 if (!llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, ckpt.pos_max + 1, -1)) {
@@ -4447,7 +4454,6 @@ unstable
                     }
                     accepted.push_back(common_sampler_sample(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch.back()));
                     common_sampler_accept(slot.smpl.get(), accepted.back(), true);
-unstable
                 } else {
                     accepted = common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
                 }
@@ -4480,7 +4486,6 @@ unstable
 
                         if (slot.ctx_dft) {
                             ckpt.load_dft(slot.ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
-unstable
                         }
 
                         slot.mem.seq_rm(slot.id, ckpt.pos_max + 1, -1);

@@ -1,7 +1,7 @@
-#include "ggml-alloc.h"
 #include "../ggml/src/ggml-backend-impl.h"
-#include "ggml-cpp.h"
 #include "../ggml/src/ggml-impl.h"
+#include "ggml-alloc.h"
+#include "ggml-cpp.h"
 #include "ggml.h"
 
 #include <algorithm>
@@ -57,9 +57,10 @@ static size_t dummy_backend_buffer_type_get_max_size(ggml_backend_buffer_type_t 
     return ctx->max_buffer_size;
 }
 
-static ggml_backend_buffer_t dummy_backend_buffer_type_alloc_buffer_n_custom(
-        ggml_backend_buffer_type_t buft, ggml_tensor ** tensors, int n_tensors) {
-    dummy_backend_context * ctx = (dummy_backend_context *) buft->context;
+static ggml_backend_buffer_t dummy_backend_buffer_type_alloc_buffer_n_custom(ggml_backend_buffer_type_t buft,
+                                                                             ggml_tensor **             tensors,
+                                                                             int                        n_tensors) {
+    dummy_backend_context * ctx       = (dummy_backend_context *) buft->context;
     ctx->custom_alloc_buffer_n_called = true;
 
     ggml_backend_buffer_t buffer = ggml_backend_buft_alloc_buffer(buft, 64);
@@ -73,8 +74,9 @@ static ggml_backend_buffer_t dummy_backend_buffer_type_alloc_buffer_n_custom(
     return buffer;
 }
 
-static size_t dummy_backend_buffer_type_get_alloc_size_n_custom(
-        ggml_backend_buffer_type_t buft, ggml_tensor ** tensors, int n_tensors) {
+static size_t dummy_backend_buffer_type_get_alloc_size_n_custom(ggml_backend_buffer_type_t buft,
+                                                                ggml_tensor **             tensors,
+                                                                int                        n_tensors) {
     dummy_backend_context * ctx = (dummy_backend_context *) buft->context;
     GGML_UNUSED(tensors);
     GGML_UNUSED(n_tensors);
@@ -104,11 +106,23 @@ static ggml_status dummy_backend_buffer_init_tensor(ggml_backend_buffer_t /*buft
     return GGML_STATUS_SUCCESS;
 }
 
-static void dummy_backend_buffer_memset_tensor(ggml_backend_buffer_t /*buft*/, ggml_tensor * /*x*/, uint8_t, size_t, size_t) {}
+static void dummy_backend_buffer_memset_tensor(ggml_backend_buffer_t /*buft*/,
+                                               ggml_tensor * /*x*/,
+                                               uint8_t,
+                                               size_t,
+                                               size_t) {}
 
-static void dummy_backend_buffer_set_tensor(ggml_backend_buffer_t /*buft*/, ggml_tensor * /*x*/, const void *, size_t, size_t) {}
+static void dummy_backend_buffer_set_tensor(ggml_backend_buffer_t /*buft*/,
+                                            ggml_tensor * /*x*/,
+                                            const void *,
+                                            size_t,
+                                            size_t) {}
 
-static void dummy_backend_buffer_get_tensor(ggml_backend_buffer_t /*buft*/, const ggml_tensor * /*x*/, void *, size_t, size_t) {}
+static void dummy_backend_buffer_get_tensor(ggml_backend_buffer_t /*buft*/,
+                                            const ggml_tensor * /*x*/,
+                                            void *,
+                                            size_t,
+                                            size_t) {}
 
 static void dummy_backend_buffer_clear(ggml_backend_buffer_t /*buft*/, uint8_t /*val*/) {}
 
@@ -381,9 +395,8 @@ static void test_tensor_larger_than_max_size() {
     GGML_ASSERT(backend.context->allocated_total() == 24);
 }
 
-// This test assumes a max of 16 buffer chunks, and tries to allocate tensors that would
-// require more. Expectation is that the last buffer should grow to fit everything,
-// leaving it to the backend to error out if it can't allocate that much.
+// Allocate tensors that need more than the initial 16 chunks. The chunk list grows,
+// and no chunk may exceed max_size (the 16th chunk used to take everything left).
 static void test_not_enough_chunks() {
     const int max_chunks = 16;
     const int max_size   = 8;
@@ -404,6 +417,7 @@ static void test_not_enough_chunks() {
     ggml_gallocr_ptr galloc = allocate_graph(graph, acc, &backend.buffer_type);
     check_all_allocated(graph);
     check_no_overlap(graph);
+    check_max_size(ctx);
     GGML_ASSERT(backend.context->allocated_total() > max_chunks * max_size);
 }
 
@@ -642,7 +656,9 @@ static void test_reallocation() {
     }
 }
 
-static void test_backend_graph_optimize(ggml_backend_t /*backend*/, ggml_cgraph * graph, ggml_backend_graph_optimize_params * params) {
+static void test_backend_graph_optimize(ggml_backend_t /*backend*/,
+                                        ggml_cgraph *                        graph,
+                                        ggml_backend_graph_optimize_params * params) {
     GGML_ASSERT(graph->n_nodes == 3);
     params->add_alloc_dep(params->user_data, graph->nodes[0], graph->nodes[2]);
 }
@@ -708,7 +724,7 @@ static void test_buft_alloc_buffer_n_single_buffer() {
     x[2] = ggml_add(ctx, x[0], x[1]);
     assign_names(ctx);
 
-    ggml_tensor * tensors[3] = { x[0], x[1], x[2] };
+    ggml_tensor *           tensors[3] = { x[0], x[1], x[2] };
     ggml_backend_buffer_ptr buffer(ggml_backend_buft_alloc_buffer_n(&backend.buffer_type, tensors, 3));
     GGML_ASSERT(buffer != nullptr);
     GGML_ASSERT(!ggml_backend_buffer_is_multi_buffer(buffer.get()));
@@ -738,7 +754,7 @@ static void test_buft_alloc_buffer_n_multi_buffer() {
     x[3] = make_input_with_size(ctx, 8);
     assign_names(ctx);
 
-    ggml_tensor * tensors[4] = { x[0], x[1], x[2], x[3] };
+    ggml_tensor *           tensors[4] = { x[0], x[1], x[2], x[3] };
     ggml_backend_buffer_ptr buffer(ggml_backend_buft_alloc_buffer_n(&backend.buffer_type, tensors, 4));
     GGML_ASSERT(buffer != nullptr);
     GGML_ASSERT(ggml_backend_buffer_is_multi_buffer(buffer.get()));
@@ -791,7 +807,7 @@ static void test_buft_alloc_buffer_n_already_allocated() {
     GGML_ASSERT(ggml_backend_alloc_ctx_tensors_from_buft_size(ctx, &backend.buffer_type) == 8);
     GGML_ASSERT(ggml_backend_buft_alloc_buffer_n(&backend.buffer_type, a, 2) == nullptr);
 
-    ggml_tensor * tensors[3] = { a[0], a[1], b };
+    ggml_tensor *           tensors[3] = { a[0], a[1], b };
     ggml_backend_buffer_ptr buf_b(ggml_backend_buft_alloc_buffer_n(&backend.buffer_type, tensors, 3));
     GGML_ASSERT(buf_b != nullptr);
     GGML_ASSERT(backend.context->buffers.size() == 2);
@@ -812,7 +828,7 @@ static void test_buft_alloc_buffer_n_views() {
     ggml_tensor * extra = make_input_1d(ctx, 2);
     assign_names(ctx);
 
-    ggml_tensor * tensors[3] = { base, view, extra };
+    ggml_tensor *           tensors[3] = { base, view, extra };
     ggml_backend_buffer_ptr buffer(ggml_backend_buft_alloc_buffer_n(&backend.buffer_type, tensors, 3));
     GGML_ASSERT(buffer != nullptr);
     GGML_ASSERT(backend.context->buffers.size() == 1);
@@ -880,7 +896,7 @@ static void test_alloc_ctx_tensors_from_buft_size_matches() {
 // Check that a backend-provided alloc_buffer_n implementation takes precedence over
 // the default one
 static void test_buft_alloc_buffer_n_custom_override() {
-    dummy_backend backend = dummy_backend_init(SIZE_MAX);
+    dummy_backend backend                    = dummy_backend_init(SIZE_MAX);
     backend.buffer_type.iface.alloc_buffer_n = dummy_backend_buffer_type_alloc_buffer_n_custom;
 
     auto [ctx, graph, ctx_ptr] = make_context();
@@ -890,7 +906,7 @@ static void test_buft_alloc_buffer_n_custom_override() {
     x[1] = make_input_with_size(ctx, 8);
     assign_names(ctx);
 
-    ggml_tensor * tensors[2] = { x[0], x[1] };
+    ggml_tensor *           tensors[2] = { x[0], x[1] };
     ggml_backend_buffer_ptr buffer(ggml_backend_buft_alloc_buffer_n(&backend.buffer_type, tensors, 2));
     GGML_ASSERT(buffer != nullptr);
     GGML_ASSERT(backend.context->custom_alloc_buffer_n_called);
@@ -1044,7 +1060,7 @@ static void test_buft_get_alloc_size_n_alignment() {
 // Check that a backend-provided get_alloc_size_n implementation takes precedence over
 // the default one
 static void test_buft_get_alloc_size_n_custom_override() {
-    dummy_backend backend = dummy_backend_init(SIZE_MAX);
+    dummy_backend backend                      = dummy_backend_init(SIZE_MAX);
     backend.buffer_type.iface.alloc_buffer_n   = dummy_backend_buffer_type_alloc_buffer_n_custom;
     backend.buffer_type.iface.get_alloc_size_n = dummy_backend_buffer_type_get_alloc_size_n_custom;
 
@@ -1067,7 +1083,7 @@ static void test_buft_get_alloc_size_n_custom_override() {
 
 // Check that the custom get_alloc_size_n override is used by the context size helper
 static void test_buft_get_alloc_size_n_custom_override_ctx_size() {
-    dummy_backend backend = dummy_backend_init(SIZE_MAX);
+    dummy_backend backend                      = dummy_backend_init(SIZE_MAX);
     backend.buffer_type.iface.get_alloc_size_n = dummy_backend_buffer_type_get_alloc_size_n_custom;
 
     auto [ctx, graph, ctx_ptr] = make_context();
