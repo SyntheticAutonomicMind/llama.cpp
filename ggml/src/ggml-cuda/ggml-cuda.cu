@@ -1936,7 +1936,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     if (ne11 > 3 && ne11 <= 8 && GGML_CUDA_CC_IS_AMD(cc) && !ggml_is_quantized(src0->type) &&
             src0->ne[1] <= 64 &&
             src0->ne[1] % (GGML_CUDA_CC_IS_CDNA(cc) ? MMF_ROWS_PER_BLOCK_CDNA : MMF_ROWS_PER_BLOCK) != 0 &&
-            ggml_cuda_should_use_mmvf(src0->type, cc, src0->ne, src0->nb, 3)) {
+            ggml_cuda_should_use_mmvf(src0->type, cc, warp_size, src0->ne, src0->nb, 3)) {
         ggml_cuda_mul_mat_vec_f(ctx, src0, src1, nullptr, dst);
         return;
     }

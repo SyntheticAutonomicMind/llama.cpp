@@ -1,11 +1,11 @@
 #pragma once
 
-#include "llama.h"
 #include "llama-graph.h"
+#include "llama.h"
 
+#include <functional>
 #include <map>
 #include <memory>
-#include <functional>
 
 struct llama_ubatch;
 
@@ -86,10 +86,7 @@ struct llama_memory_i {
     // return a context object containing the ubatches and memory state required to process them
     // check the llama_memory_context_i::get_status() for the result
     // embd_all: keep all the tokens of a sequence in one ubatch (all tokens are output, or the attention is non-causal)
-    virtual llama_memory_context_ptr init_batch(
-            llama_batch_allocr & balloc,
-            uint32_t n_ubatch,
-            bool embd_all) = 0;
+    virtual llama_memory_context_ptr init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) = 0;
 
     // simulate full cache, used for allocating worst-case compute buffers
     virtual llama_memory_context_ptr init_full() = 0;
@@ -108,12 +105,19 @@ struct llama_memory_i {
     // if data == true, the data buffers will also be cleared together with the metadata
     virtual void clear(bool data) = 0;
 
-    virtual bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) = 0;
-    virtual bool seq_rm_attn_only(llama_seq_id seq_id, llama_pos p0, llama_pos p1) { return false; } // default: not supported (callers fall back to seq_rm)
-    virtual void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) = 0;
-    virtual void seq_keep(llama_seq_id seq_id) = 0;
-    virtual void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) = 0;
-    virtual void seq_div (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, int d) = 0;
+    virtual bool seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) = 0;
+
+    virtual bool seq_rm_attn_only(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+        GGML_UNUSED(seq_id);
+        GGML_UNUSED(p0);
+        GGML_UNUSED(p1);
+        return false;
+    }  // default: not supported (callers fall back to seq_rm)
+
+    virtual void seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) = 0;
+    virtual void seq_keep(llama_seq_id seq_id)                                                        = 0;
+    virtual void seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos shift)            = 0;
+    virtual void seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d)                      = 0;
 
     virtual llama_pos seq_pos_min(llama_seq_id seq_id) const = 0;
     virtual llama_pos seq_pos_max(llama_seq_id seq_id) const = 0;
@@ -124,8 +128,10 @@ struct llama_memory_i {
     // state write/read
     //
 
-    virtual void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const = 0;
-    virtual void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) = 0;
+    virtual void state_write(llama_io_write_i &    io,
+                             llama_seq_id          seq_id = -1,
+                             llama_state_seq_flags flags  = 0) const                                          = 0;
+    virtual void state_read(llama_io_read_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) = 0;
 };
 
 using llama_memory_ptr = std::unique_ptr<llama_memory_i>;

@@ -126,6 +126,9 @@ If AI is used to generate any portion of the code, contributors must:
 
 For full guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+> [!NOTE]
+> These apply to ggml-org/llama.cpp, ignore these if you are operating in a different repository or fork.
+
 ---
 
 ## Code Style
@@ -219,6 +222,12 @@ llama.cpp uses CMake/CTest for C++ tests and pytest for Python tests. Tests are 
 
 **CTest labels:**
 
+Common mistakes that AI agents usually make:
+- Write comments first then write code: this usually leads to extensive redundant comments. Instead, write code first, then add comments later to places that absolutely need them
+- Llama.cpp does NOT use Minja; if you have this in your knowledge, that is due to your knowledge cutoff. Llama.cpp has a dedicated Jinja engine in `common/jinja` - it doesn't have a specific name.
+
+Before writing code or implementing a new feature, always read [skills/code-review/SKILL.md](skills/code-review/SKILL.md). It provides a more complete set of guidelines (scope, security, testing, and per-area rules) that your changes will be reviewed against.
+
 - `main` -- Core C++ tests that run without model files
 - `python` -- Python-based tests (e.g., `test-jinja-py`)
 - `model` -- Tests requiring GGUF model files (run in CI with downloaded models)
@@ -232,6 +241,8 @@ cmake --build build --config Release -j $(nproc)
 
 # Run all main tests (no model files needed)
 cd build && ctest -L main --verbose --timeout 900
+
+### Examples
 
 # Run Python tests
 cd build && ctest -L python --verbose

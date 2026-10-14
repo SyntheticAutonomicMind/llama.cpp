@@ -26,6 +26,7 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN4EXP
 
     # the MTP block is a separate draft head
+    supports_mtp_export = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
