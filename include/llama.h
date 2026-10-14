@@ -43,10 +43,10 @@
 #define LLAMA_FILE_MAGIC_GGSQ 0x67677371u // 'ggsq'
 
 #define LLAMA_SESSION_MAGIC   LLAMA_FILE_MAGIC_GGSN
-#define LLAMA_SESSION_VERSION 10
+#define LLAMA_SESSION_VERSION 11
 
 #define LLAMA_STATE_SEQ_MAGIC   LLAMA_FILE_MAGIC_GGSQ
-#define LLAMA_STATE_SEQ_VERSION 3
+#define LLAMA_STATE_SEQ_VERSION 4
 
 #ifdef __cplusplus
 extern "C" {
@@ -78,6 +78,7 @@ extern "C" {
         LLAMA_VOCAB_TYPE_RWKV   = 5, // RWKV tokenizer based on greedy tokenization
         LLAMA_VOCAB_TYPE_PLAMO2 = 6, // PLaMo-2 tokenizer based on Aho-Corasick with dynamic programming
         LLAMA_VOCAB_TYPE_TEST   = 7, // Dummy tokenizer for testing: rolling hash of fixed-size chunks -> tokens, tokens -> hex
+        LLAMA_VOCAB_TYPE_PLAMO3 = 8, // PLaMo-3 tokenizer with pre-segmentation and dynamic programming
     };
 
     enum llama_rope_type {
@@ -353,6 +354,9 @@ extern "C" {
         bool no_host;         // bypass host buffer allowing extra buffers to be used
         bool no_alloc;        // only load metadata and simulate memory allocations
         bool load_mtp;        // whether to load MTP layers
+
+        // optional GGUF with per-layer embedding (PLE) tables: its tensors replace the lookup tables of the same name in the model
+        const char * path_ple;
     };
 
     struct llama_sampler_seq_config {
@@ -372,6 +376,7 @@ extern "C" {
         uint32_t n_outputs_max_per_seq; // max outputs per sequence (0 = n_outputs_max)
         int32_t  n_threads;             // number of threads to use for generation
         int32_t  n_threads_batch;       // number of threads to use for batch processing
+        int32_t  mtp_draft_vocab;       // MTP contexts only: draft over token ids < N plus control tokens (0 = full vocabulary) [EXPERIMENTAL]
 
         enum llama_context_type      ctx_type;          // set the context type (e.g. MTP)
         enum llama_rope_scaling_type rope_scaling_type; // RoPE scaling type, from `enum llama_rope_scaling_type`
@@ -394,6 +399,8 @@ extern "C" {
 
         enum ggml_type type_k; // data type for K cache [EXPERIMENTAL]
         enum ggml_type type_v; // data type for V cache [EXPERIMENTAL]
+
+        size_t moe_cache_size; // device cache in bytes for the experts kept in host memory, split among the devices like the layers, 0 = disabled [EXPERIMENTAL]
 
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted
@@ -1067,6 +1074,7 @@ extern "C" {
     // "state" here means extra hidden state carried over from a previous stage, e.g.:
     //   - MTP: state from N layers of the target model
     //   - Qwen3 VL (deepstack): state from N layers of the vision encoder
+    // Returns false if the context does not take a state embedding (currently only MTP contexts do)
     LLAMA_API bool llama_batch_ext_set_embd_state(
                                 struct llama_batch_ext * batch,
                                                int32_t   idx,
@@ -1088,7 +1096,7 @@ extern "C" {
 
     // Set custom position for the token at index idx in the batch
     // For M-RoPE models:
-    //     - Embedding tokens must have multiple positions per token
+    //     - Embedding tokens must have n_pos_per_embd positions per token, in order [t, y, x, z]; t is also the KV cache position
     //     - Text token only requires one single position per token
     LLAMA_API bool llama_batch_ext_set_pos(
                                 struct llama_batch_ext * batch,
@@ -1696,6 +1704,8 @@ extern "C" {
         int32_t n_p_eval;   // number of prompt tokens
         int32_t n_eval;     // number of generated tokens
         int32_t n_reused;   // number of times a ggml compute graph had been reused
+        int32_t n_reallocs_same; // number of graph reallocations during inference with an unchanged graph size
+        int32_t n_reallocs_diff; // number of graph reallocations during inference with a changed graph size
     };
 
     struct llama_perf_sampler_data {

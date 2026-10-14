@@ -84,10 +84,12 @@ function(llama_build_and_test source)
     include(CMakeParseArguments)
     set(options)
     set(oneValueArgs NAME LABEL WORKING_DIRECTORY)
-    set(multiValueArgs ARGS)
-    cmake_parse_arguments(LLAMA_TEST "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    set(multiValueArgs LINK)
+    cmake_parse_arguments(LLAMA_BUILD "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
-    set(TEST_SOURCES ${source} ${LLAMA_TEST_UNPARSED_ARGUMENTS})
+    # Optional args:
+    # - LINK: libraries to link against (defaults to llama-common, which also brings llama)
+    set(TEST_SOURCES ${source} ${LLAMA_BUILD_UNPARSED_ARGUMENTS})
 
     if (NOT DEFINED LLAMA_TEST_LABEL)
         set(LLAMA_TEST_LABEL "main")
@@ -105,7 +107,11 @@ function(llama_build_and_test source)
     if (LLAMA_TESTS_INSTALL)
         install(TARGETS ${TEST_TARGET} RUNTIME)
     endif()
-    target_link_libraries(${TEST_TARGET} PRIVATE llama-common)
+    if (DEFINED LLAMA_BUILD_LINK)
+        target_link_libraries(${TEST_TARGET} PRIVATE ${LLAMA_BUILD_LINK})
+    else()
+        target_link_libraries(${TEST_TARGET} PRIVATE llama-common)
+    endif()
 
     add_test(
         NAME ${TEST_TARGET}
