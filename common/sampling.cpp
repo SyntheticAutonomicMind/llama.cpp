@@ -128,6 +128,8 @@ struct common_sampler {
     void reset() {
         prev.clear();
 
+        llama_sampler_reset(grmr);
+        llama_sampler_reset(rbudget);
         llama_sampler_reset(chain);
     }
 
@@ -312,17 +314,31 @@ struct common_sampler * common_sampler_init(
     }
 
     // reasoning budget sampler (skip when budget is unlimited unless a lazy grammar is active, which needs rbudget for thinking-block suppression)
-    if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() && (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
+    // Note: models with force-opened thinking (e.g. Laguna) have an empty start tag but still
+    // need budget enforcement. The thinking block is opened by the generation prompt, so we
+    // start in IDLE, process prefill tokens, then transition to COUNTING for force-opened thinking.
+    if (!params.reasoning_budget_end.empty() && (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
+        const bool start_is_empty = params.reasoning_budget_start.empty();
         rbudget = common_reasoning_budget_init(
             vocab,
             {params.reasoning_budget_start},
             params.reasoning_budget_end,
             params.reasoning_budget_forced,
-            params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens);
+            params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens,
+            REASONING_BUDGET_IDLE);
 
         for (const auto & token : prefill_tokens) {
             llama_sampler_accept(rbudget, token);
             LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
+        }
+
+        // For force-opened thinking (empty start tag), the thinking block is already open
+        // in the generation prompt after prefill. Transition to COUNTING so budget tracking
+        // begins on model-generated tokens. The end_matcher is reset so that end tags from
+        // preserved previous-turn thinking don't prematurely close the new block.
+        if (start_is_empty) {
+            common_reasoning_budget_start(rbudget);
+            LOG_DBG("%s: reasoning-budget transitioned to counting (force-opened thinking)\n", __func__);
         }
     }
 
@@ -858,6 +874,14 @@ bool common_sampler_reasoning_budget_force(struct common_sampler * gsmpl) {
     }
 
     return common_reasoning_budget_force(gsmpl->rbudget);
+}
+
+bool common_sampler_reasoning_budget_start(struct common_sampler * gsmpl) {
+    if (!gsmpl) {
+        return false;
+    }
+
+    return common_reasoning_budget_start(gsmpl->rbudget);
 }
 
 // helpers

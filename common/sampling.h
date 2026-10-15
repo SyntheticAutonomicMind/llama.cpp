@@ -96,6 +96,11 @@ uint32_t common_sampler_get_seed(const struct common_sampler * gsmpl);
 // force the reasoning budget sampler (if any) to begin forcing its end sequence now.
 bool common_sampler_reasoning_budget_force(struct common_sampler * gsmpl);
 
+// transition the reasoning budget sampler (if any) from IDLE to COUNTING.
+// used for force-opened thinking (empty start tag) where the thinking block is
+// already open in the prompt after prefill.
+bool common_sampler_reasoning_budget_start(struct common_sampler * gsmpl);
+
 // helpers
 
 // access the internal list of current candidate tokens

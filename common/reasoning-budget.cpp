@@ -60,6 +60,7 @@ struct common_reasoning_budget_ctx {
     int32_t remaining;        // tokens remaining in budget
 
     common_reasoning_budget_state state;
+    common_reasoning_budget_state initial_state;
 
     // for forcing
     size_t force_pos;         // next position in forced_tokens to force
@@ -158,6 +159,21 @@ static void common_reasoning_budget_accept(struct llama_sampler * smpl, llama_to
                     ctx->force_pos = 0;
                     COM_TRC("%s", "budget=0, forcing immediately\n");
                 }
+            } else if (ctx->start_matcher.seqs.empty()) {
+                // Force-opened reasoning (empty start tag): re-arm on the end tag,
+                // since a new block may start after the end tag is emitted.
+                if (ctx->end_matcher.advance(token) >= 0) {
+                    ctx->state = REASONING_BUDGET_COUNTING;
+                    ctx->remaining = ctx->budget;
+                    ctx->end_match = -1;
+                    COM_TRC("re-activated on end tag (force-opened reasoning), budget=%d tokens\n", ctx->budget);
+
+                    if (ctx->remaining <= 0) {
+                        ctx->state = REASONING_BUDGET_FORCING;
+                        ctx->force_pos = 0;
+                        COM_TRC("%s", "budget=0, forcing immediately\n");
+                    }
+                }
             }
             break;
     }
@@ -187,7 +203,7 @@ static void common_reasoning_budget_apply(struct llama_sampler * smpl, llama_tok
 
 static void common_reasoning_budget_reset(struct llama_sampler * smpl) {
     auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
-    ctx->state = REASONING_BUDGET_IDLE;
+    ctx->state     = ctx->initial_state;
     ctx->remaining = ctx->budget;
     ctx->start_matcher.reset();
     ctx->end_matcher.reset();
@@ -252,6 +268,7 @@ static struct llama_sampler * common_reasoning_budget_init_state(
             /* .budget        = */ budget,
             /* .remaining     = */ budget,
             /* .state         = */ initial_state,
+            /* .initial_state = */ initial_state,
             /* .force_pos     = */ 0,
             /* .end_match     = */ -1,
         }
@@ -305,6 +322,33 @@ bool common_reasoning_budget_force(struct llama_sampler * smpl) {
     ctx->force_pos = 0;
     ctx->end_matcher.reset();
     COM_TRC("%s", "forced into forcing state (manual transition)\n");
+
+    return true;
+}
+
+bool common_reasoning_budget_start(struct llama_sampler * smpl) {
+    if (!smpl) {
+        return false;
+    }
+
+    auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
+
+    // only transition from IDLE to COUNTING; if already active or done, no-op
+    if (ctx->state != REASONING_BUDGET_IDLE) {
+        return false;
+    }
+
+    ctx->state = REASONING_BUDGET_COUNTING;
+    ctx->remaining = ctx->budget;
+    ctx->end_matcher.reset();
+    ctx->end_match = -1;
+    COM_TRC("started counting (force-opened thinking), budget=%d tokens\n", ctx->budget);
+
+    if (ctx->remaining <= 0) {
+        ctx->state = REASONING_BUDGET_FORCING;
+        ctx->force_pos = 0;
+        COM_TRC("%s", "budget=0, forcing immediately\n");
+    }
 
     return true;
 }

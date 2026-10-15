@@ -50,3 +50,9 @@ const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sa
 // Manually transition the reasoning budget sampler into the FORCING state.
 // Returns true if the transition occurred.
 bool common_reasoning_budget_force(struct llama_sampler * smpl);
+
+// Transition the reasoning budget sampler from IDLE to COUNTING, resetting the
+// end-match state. Used for force-opened thinking (empty start tag) where the
+// thinking block is opened by the template's generation prompt rather than by
+// a start tag token sequence. Returns true if the transition occurred.
+bool common_reasoning_budget_start(struct llama_sampler * smpl);

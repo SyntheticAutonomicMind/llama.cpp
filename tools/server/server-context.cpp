@@ -14,6 +14,7 @@
 #include "llama.h"
 #include "log.h"
 #include "sampling.h"
+#include "reasoning-budget.h"
 #include "speculative.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
@@ -433,6 +434,14 @@ struct server_slot {
                 common_sampler_accept(smpl.get(), id, false);
                 n_text++;
             }
+        }
+
+        // For force-opened thinking (empty start tag), the thinking block is already
+        // open after the prompt. Transition the rbudget from IDLE to COUNTING so the
+        // budget is tracked for the upcoming generation. This must happen after
+        // common_sampler_reset (which resets the rbudget) and after prefill.
+        if (smpl && task && task->params.sampling.reasoning_budget_start.empty()) {
+            common_sampler_reasoning_budget_start(smpl.get());
         }
 
         SLT_TRC(*this, "init sampler, took %0.2f ms, tokens: text = %d, total = %d\n",
