@@ -436,11 +436,16 @@ struct server_slot {
             }
         }
 
-        // For force-opened thinking (empty start tag), the thinking block is already
-        // open after the prompt. Transition the rbudget from IDLE to COUNTING so the
-        // budget is tracked for the upcoming generation. This must happen after
+        // For force-opened thinking (empty start tag) and for templates where the
+        // start tag is in the generation prompt, the thinking block is already
+        // open after the prompt. Transition the rbudget from IDLE to COUNTING so
+        // the budget is tracked for the upcoming generation. This must happen after
         // common_sampler_reset (which resets the rbudget) and after prefill.
-        if (smpl && task && task->params.sampling.reasoning_budget_start.empty()) {
+        // Note: common_sampler_reset resets the rbudget to IDLE, and prefill tokens
+        // are fed with is_generated=false (so the rbudget does not see them). We
+        // manually start counting here so the budget is enforced regardless of
+        // whether the start tag is empty (force-opened) or explicit.
+        if (smpl && task && !task->params.sampling.reasoning_budget_end.empty()) {
             common_sampler_reasoning_budget_start(smpl.get());
         }
 
