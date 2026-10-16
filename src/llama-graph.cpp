@@ -2010,6 +2010,19 @@ ggml_tensor * llm_graph_context::build_ffn(
                     cb(cur, "ffn_act", il);
                 }
             } break;
+        case LLM_FFN_GELU_ERF:
+            if (gate && type_gate == LLM_FFN_PAR) {
+                cur = ggml_geglu_erf_split(ctx0, cur, tmp);
+                cb(cur, "ffn_geglu_erf", il);
+                type_gate = LLM_FFN_SEQ;
+            } else {
+                cur = ggml_gelu_erf(ctx0, cur);
+                cb(cur, "ffn_gelu_erf", il);
+                if (act_scales != NULL) {
+                    cur = ggml_div(ctx0, cur, act_scales);
+                    cb(cur, "ffn_act", il);
+                }
+            } break;
         case LLM_FFN_RELU:
             if (gate && type_gate == LLM_FFN_PAR) {
                 cur = ggml_reglu_split(ctx0, cur, tmp);
@@ -2112,7 +2125,9 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * up_exps_s,
          ggml_tensor * gate_exps_s,
          ggml_tensor * down_exps_s,
-         ggml_tensor * selected_experts_in) const {
+         ggml_tensor * selected_experts_in,
+         ggml_tensor * post_exp_norm,
+               float   post_exp_norm_eps) const {
     return build_moe_ffn(
         cur,
         gate_inp,  /* gate_inp_b  */ nullptr,
@@ -2133,7 +2148,9 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         up_exps_s,
         gate_exps_s,
         down_exps_s,
-        selected_experts_in
+        selected_experts_in,
+        post_exp_norm,
+        post_exp_norm_eps
     );
 }
 
@@ -2161,7 +2178,9 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * up_exps_s,
          ggml_tensor * gate_exps_s,
          ggml_tensor * down_exps_s,
-         ggml_tensor * selected_experts_in) const {
+         ggml_tensor * selected_experts_in,
+         ggml_tensor * post_exp_norm,
+               float   post_exp_norm_eps) const {
     const int64_t n_embd   = cur->ne[0];
     const int64_t n_tokens = cur->ne[1];
     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
@@ -3089,11 +3108,15 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = k_cur;
     ggml_tensor * v = v_cur;
 
-    // the KV values are padded with zeros up to the KV dimension of the mask
+    // the KV values and the KQ bias are padded with zeros up to the KV dimension of the mask
     const int64_t n_kv_pad = kq_mask->ne[0] - k->ne[2];
 
     k = ggml_pad(ctx0, k, 0, 0, n_kv_pad, 0);
     v = ggml_pad(ctx0, v, 0, 0, n_kv_pad, 0);
+
+    if (kq_b) {
+        kq_b = ggml_pad(ctx0, kq_b, n_kv_pad, 0, 0, 0);
+    }
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
     cb(cur, "kqv_out", il);
@@ -4007,6 +4030,10 @@ void llm_graph_context::build_pooling(
         ggml_tensor * cls_out_b,
         ggml_tensor * cls_norm) const {
     if (!cparams.embeddings) {
+        // a graph without logits still computes t_embd, so that it is never empty
+        if (res->t_logits == nullptr && res->t_embd != nullptr) {
+            ggml_build_forward_expand(gf, res->t_embd);
+        }
         return;
     }
 
@@ -4094,6 +4121,18 @@ void llm_graph_context::build_pooling(
     res->t_embd_pooled = cur;
 
     ggml_build_forward_expand(gf, cur);
+}
+
+void llm_graph_context::build_logits() const {
+    // a pooled embeddings context outputs one vector per sequence, so its graph skips the LM head
+    if (cparams.embeddings && pooling_type != LLAMA_POOLING_TYPE_NONE) {
+        res->t_logits = nullptr;
+    }
+
+    // the models declare t_logits without expanding it, so the LM head is computed only when it is expanded here
+    if (res->t_logits != nullptr) {
+        ggml_build_forward_expand(gf, res->t_logits);
+    }
 }
 
 void llm_graph_context::build_sampling() const {

@@ -6210,8 +6210,22 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
     }
 }
 
+static bool ggml_vk_external_memory_host_usable(vk::DriverId driver_id) {
+    // Disable external_memory_host until https://github.com/KhronosGroup/MoltenVK/pull/2622
+    // is available in the Vulkan SDK.
+    return driver_id != vk::DriverId::eMoltenvk;
+}
+
+static bool ggml_vk_host_buffer_import_usable(uint32_t vendor_id) {
+    // amdgpu re-faults all pages of every imported host allocation on each submission
+    return vendor_id != VK_VENDOR_ID_AMD;
+}
+
 vk_device ggml_vk_get_device(size_t idx) {
     VK_LOG_DEBUG("ggml_vk_get_device(" << idx << ")");
+
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
 
     if (vk_instance.devices[idx] == nullptr) {
         VK_LOG_DEBUG("Initializing new vk_device");
@@ -6396,11 +6410,7 @@ vk_device ggml_vk_get_device(size_t idx) {
         device->vendor_id  = device->properties.vendorID;
         device->driver_id  = driver_props.driverID;
 
-        if (device->driver_id == vk::DriverId::eMoltenvk) {
-            // Disable external_memory_host until https://github.com/KhronosGroup/MoltenVK/pull/2622
-            // is available in the Vulkan SDK.
-            device->external_memory_host = false;
-        }
+        device->external_memory_host = device->external_memory_host && ggml_vk_external_memory_host_usable(device->driver_id);
 
         // Implementing the async backend interfaces seems broken on older Intel HW,
         // see https://github.com/ggml-org/llama.cpp/issues/17302.
@@ -7133,13 +7143,13 @@ vk_device ggml_vk_get_device(size_t idx) {
             device->async_use_transfer_queue = false;
         }
 
+        device->fence = device->device.createFence({});
+
         device->buffer_type = {
             /* .iface    = */ ggml_backend_vk_buffer_type_interface,
             /* .device   = */ ggml_backend_reg_dev_get(ggml_backend_vk_reg(), idx),
             /* .context  = */ new ggml_backend_vk_buffer_type_context{ device->name, device },
         };
-
-        device->fence = device->device.createFence({});
 
         device->idx = idx;
 
@@ -7160,6 +7170,9 @@ vk_device ggml_vk_get_device(size_t idx) {
         } else if (getenv("GGML_VK_FORCE_MMVQ")) {
             device->mmvq_mode = 1;
         }
+
+        // publish the device only when it is fully built
+        vk_instance.devices[idx] = device;
 
         return device;
     }
@@ -7660,22 +7673,44 @@ void ggml_vk_instance_init() {
     }
     GGML_LOG_DEBUG("ggml_vulkan: Found %zu Vulkan devices:\n", vk_instance.device_indices.size());
 
+    size_t host_buffer_import_count = 0;
     for (size_t i = 0; i < vk_instance.device_indices.size(); i++) {
         vk::PhysicalDevice                   vkdev          = devices[vk_instance.device_indices[i]];
         std::vector<vk::ExtensionProperties> extensionprops = vkdev.enumerateDeviceExtensionProperties();
 
         bool membudget_supported = false;
+        bool external_memory_host_supported = false;
         for (const auto & ext : extensionprops) {
             if (strcmp(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, ext.extensionName) == 0) {
                 membudget_supported = true;
-                break;
+            } else if (strcmp("VK_EXT_external_memory_host", ext.extensionName) == 0) {
+                external_memory_host_supported = true;
             }
         }
 
         vk_instance.device_supports_membudget.push_back(membudget_supported);
 
+        bool host_buffer_import = false;
+        if (external_memory_host_supported) {
+            vk::PhysicalDeviceProperties2 props2;
+            vk::PhysicalDeviceDriverProperties driver_props;
+            vk::PhysicalDeviceExternalMemoryHostPropertiesEXT ext_props;
+            props2.pNext = &driver_props;
+            driver_props.pNext = &ext_props;
+            vkdev.getProperties2(&props2);
+            host_buffer_import = ggml_vk_external_memory_host_usable(driver_props.driverID) &&
+                                 ggml_vk_host_buffer_import_usable(props2.properties.vendorID);
+            if (host_buffer_import) {
+                vk_instance.host_import_alignment = std::max<size_t>(vk_instance.host_import_alignment, ext_props.minImportedHostPointerAlignment);
+                host_buffer_import_count++;
+            }
+        }
+        vk_instance.device_host_buffer_import.push_back(host_buffer_import);
+
         ggml_vk_print_gpu_info(i);
     }
+
+    vk_instance.multi_device = host_buffer_import_count > 1 && vk_instance.device_host_buffer_import[0];
 }
 
 void ggml_vk_init(ggml_backend_vk_context * ctx, size_t idx) {
@@ -8454,25 +8489,11 @@ vk_pipeline ggml_vk_get_cpy_pipeline(ggml_backend_vk_context * ctx,
         }
     }
 
-    if (src->type == GGML_TYPE_F32 && to == GGML_TYPE_F32) {
-        if (contig) {
-            return ctx->device->pipeline_contig_cpy_f32_f32;
-        } else {
-            return ctx->device->pipeline_cpy_f32_f32;
-        }
-    }
     if (src->type == GGML_TYPE_F32 && to == GGML_TYPE_F16) {
         if (contig) {
             return ctx->device->pipeline_contig_cpy_f32_f16;
         } else {
             return ctx->device->pipeline_cpy_f32_f16;
-        }
-    }
-    if (src->type == GGML_TYPE_F16 && to == GGML_TYPE_F16) {
-        if (contig) {
-            return ctx->device->pipeline_contig_cpy_f16_f16;
-        } else {
-            return ctx->device->pipeline_cpy_f16_f16;
         }
     }
     if (src->type == GGML_TYPE_F16 && to == GGML_TYPE_F32) {
@@ -8557,15 +8578,15 @@ vk_pipeline ggml_vk_get_cpy_pipeline(ggml_backend_vk_context * ctx,
         GGML_ASSERT(ggml_is_quantized(to) || ggml_type_size(src->type) == 2 || ggml_type_size(src->type) == 4);
         if ((ggml_type_size(src->type) % 4) == 0) {
             if (contig) {
-                return ctx->device->pipeline_contig_cpy_f32_f32;
+                return ctx->device->pipeline_contig_cpy_32;
             } else {
-                return ctx->device->pipeline_cpy_f32_f32;
+                return ctx->device->pipeline_cpy_32;
             }
         } else {
             if (contig) {
-                return ctx->device->pipeline_contig_cpy_f16_f16;
+                return ctx->device->pipeline_contig_cpy_16;
             } else {
-                return ctx->device->pipeline_cpy_f16_f16;
+                return ctx->device->pipeline_cpy_16;
             }
         }
     }
@@ -10142,6 +10163,8 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx,
         mmp_map =
             ggml_vk_get_mul_mat_mat_pipeline_map(ctx, f16_type, y_kernel_type, (ggml_prec) dst->op_params[0], true);
     }
+
+    GGML_ASSERT(mmp_map != nullptr);
 
     // Coopmat2 MUL_MAT_ID BK specialization constants in ggml_vk_load_shaders are at most 64.
     const uint32_t y_staged_row_stride = ctx->device->coopmat2 && !quantize_y ? ggml_vk_align_size(ne10, 64) : ne10;
@@ -16836,7 +16859,7 @@ static const char * ggml_backend_vk_host_buffer_type_name(ggml_backend_buffer_ty
 
 static void ggml_backend_vk_host_buffer_free_buffer(ggml_backend_buffer_t buffer) {
     VK_LOG_MEMORY("ggml_backend_vk_host_buffer_free_buffer()");
-    ggml_vk_host_free(vk_instance.devices[0], buffer->context);
+    ggml_vk_host_free(buffer->context);
 }
 
 static ggml_backend_buffer_t ggml_backend_vk_host_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft,
@@ -19042,7 +19065,10 @@ void ggml_backend_vk_get_device_memory(int device, size_t * free, size_t * total
             *total += heap.size;
 
             if (membudget_supported && i < budgetprops.heapUsage.size()) {
-                *free += budgetprops.heapBudget[i] - budgetprops.heapUsage[i];
+                // Driver may report heapBudget > heap.size so we add a safeguard here
+                // See https://github.com/ggml-org/llama.cpp/issues/29277
+                const vk::DeviceSize budget = std::min(budgetprops.heapBudget[i], heap.size);
+                *free += budget > budgetprops.heapUsage[i] ? budget - budgetprops.heapUsage[i] : 0;
             } else {
                 *free += heap.size;
             }
@@ -20193,6 +20219,11 @@ void vk_queue_handle_unsynchronized::submit(vk::ArrayProxy<const vk::SubmitInfo>
 }
 
 vk_device_struct::~vk_device_struct() {
+    // the build failed before the device was created, nothing to destroy
+    if (device == VK_NULL_HANDLE) {
+        return;
+    }
+
     VK_LOG_DEBUG("destroy device " << name);
 
     device.destroyFence(fence);
