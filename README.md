@@ -17,6 +17,22 @@
 
 </div>
 
+## Synthetic Autonomic Mind fork
+
+A community fork of [`llama.cpp`](https://github.com/ggml-org/llama.cpp) optimized for **Poolside Laguna S 2.1 (Q4_K_XL, Q5_K_XL)**, **Qwen3.8 Flash Next (Q4_K_XL)**, **Qwen 3.6 35B A3B (Q8_K_XL, Q4_K_XL)**, and other models. `stable` is the current stable variant; `unstable` contains our latest changes; `master` tracks upstream.
+
+**What this fork adds on top of upstream:**
+
+| Change | Flag | What it does |
+| --- | --- | --- |
+| Adaptive speculative draft length | `--spec-draft-adaptive` | Sizes each draft from a measured per-sequence acceptance EMA instead of always drafting `--spec-draft-n-max`; improves throughput across content types without changing output |
+| Higher-precision embedding tables | `--ple FILE` | Loads per-layer embedding (PLE) tables from a sidecar GGUF, replacing the lookup tables of the same name in the model file |
+| Qwen3.8-Flash-Next MTP draft head | `-md` / `--model-draft` | Integrates the model's MTP head with the hybrid-idx KV cache memory and graph fusion for multi-token draft proposals |
+| Laguna S 2.1 support | | DFlash-based draft model integration with shared embedding contexts, target-layer extraction, and f16-activation overflow sanitization on Metal |
+| Vulkan FA for q4_0/q4_1/q5_0/q5_1 | | Extends the dequant-once flash attention scratch path to common 4–5-bit quant types, not just Q8_0 |
+| AMD coopmat tuning | | f16-B matmul auto-mode for RDNA3, density-aware vec-vs-coopmat dispatch, int8 quantized matmul shaders, deterministic top-K radix select |
+| UMA-aware memory gating | | `common/host-ram.cpp` queries available RAM to gate FA scratch allocation on APUs and hybrid GPU systems |
+
 ## Quick start
 
 A few options to get `llama.cpp` installed on your machine:
