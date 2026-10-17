@@ -275,11 +275,35 @@ static size_t ggml_vk_host_allocation_find(const void * ptr) {
     return SIZE_MAX;
 }
 
-    if(!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible)) {
-        GGML_LOG_WARN("ggml_vulkan: failed to allocate %.2f MB of pinned memory\n",
-            size/1024.0/1024.0);
-        device->device.freeMemory(buf->device_memory);
-        device->device.destroyBuffer(buf->buffer);
+void * ggml_vk_host_malloc(size_t size) {
+    VK_LOG_MEMORY("ggml_vk_host_malloc(" << size << ")");
+
+    ggml_vk_instance_init();
+
+    if (vk_instance.multi_device) {
+        const size_t align      = std::max<size_t>(vk_instance.host_import_alignment, TENSOR_ALIGNMENT);
+        const size_t alloc_size = (size + align - 1) / align * align;
+
+        void * ptr = portable_aligned_malloc(align, alloc_size);
+        if (ptr == nullptr) {
+            return nullptr;
+        }
+        vk_host_allocation entry;
+        entry.base = ptr;
+        entry.size = alloc_size;
+
+        std::unique_lock<std::shared_mutex> guard(vk_instance.host_allocations_mutex);
+        vk_instance.host_allocations.push_back(std::move(entry));
+        return ptr;
+    }
+
+    vk_device dev0 = ggml_vk_get_device(0);
+    vk_buffer buf;
+    try {
+        buf = ggml_vk_create_buffer(dev0, size,
+            {vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
+             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
+    } catch (vk::SystemError&) {
         return nullptr;
     }
 
@@ -313,10 +337,8 @@ void ggml_vk_host_free(void * ptr) {
             fprintf(stderr, "WARNING: failed to free pinned memory: memory not in map\n");
             return;
         }
-    }
-    if (buf == nullptr) {
-        GGML_LOG_WARN("ggml_vulkan: failed to free pinned memory: memory not in map\n");
-        return;
+        entry = std::move(vk_instance.host_allocations[index]);
+        vk_instance.host_allocations.erase(vk_instance.host_allocations.begin() + index);
     }
 
     for (auto & view : entry.views) {

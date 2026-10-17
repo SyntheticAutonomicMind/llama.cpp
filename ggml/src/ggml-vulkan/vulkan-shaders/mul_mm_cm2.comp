@@ -368,6 +368,8 @@ void main() {
     const uint blocks_m = (p.M + BM - 1) / BM;
     const uint ik = gl_WorkGroupID.x / blocks_m;
 
+    const uint ir = gl_WorkGroupID.x % blocks_m;
+
 #ifdef MUL_MAT_ID
     if (p.hoist_row_ids != 0) {
         load_row_ids_hoisted(expert_idx, ic);

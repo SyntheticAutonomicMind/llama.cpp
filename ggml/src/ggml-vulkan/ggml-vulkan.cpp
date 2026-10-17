@@ -5158,11 +5158,11 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
     ggml_vk_create_pipeline(device, device->pipeline_l2_norm_f32, "l2_norm_f32", l2_norm_f32_len, l2_norm_f32_data,
                             "main", 2, sizeof(vk_op_unary_push_constants), { 1, 1, 1 }, {}, 1);
 
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_f32_f32, "cpy_f32_f32", cpy_f32_f32_len, cpy_f32_f32_data,
+    ggml_vk_create_pipeline(device, device->pipeline_cpy_32, "cpy_32", cpy_32_len, cpy_32_data,
                             "main", 2, sizeof(vk_op_unary_push_constants), { 512, 1, 1 }, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_cpy_f32_f16, "cpy_f32_f16", cpy_f32_f16_len, cpy_f32_f16_data,
                             "main", 2, sizeof(vk_op_unary_push_constants), { 512, 1, 1 }, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_f16_f16, "cpy_f16_f16", cpy_f16_f16_len, cpy_f16_f16_data,
+    ggml_vk_create_pipeline(device, device->pipeline_cpy_16, "cpy_16", cpy_16_len, cpy_16_data,
                             "main", 2, sizeof(vk_op_unary_push_constants), { 512, 1, 1 }, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_cpy_f16_f32, "cpy_f16_f32", cpy_f16_f32_len, cpy_f16_f32_data,
                             "main", 2, sizeof(vk_op_unary_push_constants), { 512, 1, 1 }, {}, 1);
@@ -5177,14 +5177,14 @@ void ggml_vk_load_shaders(vk_device & device, vk_pipeline requested) {
     ggml_vk_create_pipeline(device, device->pipeline_cpy_f32_i32, "cpy_f32_i32", cpy_f32_i32_len, cpy_f32_i32_data,
                             "main", 2, sizeof(vk_op_unary_push_constants), { 512, 1, 1 }, {}, 1);
 
-    ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_f32_f32, "contig_cpy_f32_f32", contig_cpy_f32_f32_len,
-                            contig_cpy_f32_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), { 512, 1, 1 }, {},
+    ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_32, "contig_cpy_32", contig_cpy_32_len,
+                            contig_cpy_32_data, "main", 2, sizeof(vk_op_unary_push_constants), { 512, 1, 1 }, {},
                             1);
     ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_f32_f16, "contig_cpy_f32_f16", contig_cpy_f32_f16_len,
                             contig_cpy_f32_f16_data, "main", 2, sizeof(vk_op_unary_push_constants), { 512, 1, 1 }, {},
                             1);
-    ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_f16_f16, "contig_cpy_f16_f16", contig_cpy_f16_f16_len,
-                            contig_cpy_f16_f16_data, "main", 2, sizeof(vk_op_unary_push_constants), { 512, 1, 1 }, {},
+    ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_16, "contig_cpy_16", contig_cpy_16_len,
+                            contig_cpy_16_data, "main", 2, sizeof(vk_op_unary_push_constants), { 512, 1, 1 }, {},
                             1);
     ggml_vk_create_pipeline(device, device->pipeline_contig_cpy_f16_f32, "contig_cpy_f16_f32", contig_cpy_f16_f32_len,
                             contig_cpy_f16_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), { 512, 1, 1 }, {},
@@ -16869,7 +16869,7 @@ static ggml_backend_buffer_t ggml_backend_vk_host_buffer_type_alloc_buffer(ggml_
     size += 32;  // Behave like the CPU buffer type
     void * ptr = nullptr;
     try {
-        ptr = ggml_vk_host_malloc(vk_instance.devices[0], size);
+        ptr = ggml_vk_host_malloc(size);
     } catch (vk::SystemError & e) {
         GGML_LOG_WARN("ggml_vulkan: Failed to allocate pinned memory (%s)\n", e.what());
         // fallback to cpu buffer
