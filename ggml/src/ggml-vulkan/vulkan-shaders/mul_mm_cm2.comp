@@ -45,6 +45,7 @@ const uint BNover2 = BN / 2;
 const uint BNover4 = enable_smaller_matrices ? (BN / 4) : (BN / 2);
 layout (constant_id = 5) const uint ALIGNED = 0;
 layout (constant_id = 6) const uint subgroup_size = 32;
+#define GROUP_A_BUDGET (8u * 1024u * 1024u)
 
 #ifdef MULMAT_QUANT
 
@@ -365,8 +366,9 @@ void main() {
 #endif
 
     const uint blocks_m = (p.M + BM - 1) / BM;
-    const uint ir = gl_WorkGroupID.x % blocks_m;
     const uint ik = gl_WorkGroupID.x / blocks_m;
+
+    const uint ir = gl_WorkGroupID.x % blocks_m;
 
 #ifdef MUL_MAT_ID
     if (p.hoist_row_ids != 0) {
