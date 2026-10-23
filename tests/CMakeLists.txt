@@ -139,7 +139,7 @@ llama_test(test-tokenizer-0 NAME test-tokenizer-0-command-r         ARGS ${PROJE
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-deepseek-coder    ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-deepseek-coder.gguf)
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-deepseek-llm      ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-deepseek-llm.gguf)
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-falcon            ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-falcon.gguf)
-llama_test(test-tokenizer-0 NAME test-tokenizer-0-gemma-4           ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-gemma-4.gguf)
+llama_test(test-tokenizer-0 NAME test-tokenizer-0-gemma-4           ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-gemma-4.gguf --check-decode)
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-gpt-2             ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-gpt-2.gguf)
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-llama-bpe         ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-llama-bpe.gguf)
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-llama-spm         ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-llama-spm.gguf)
@@ -318,11 +318,13 @@ endif()
 
 if (NOT GGML_BACKEND_DL AND GGML_CPU)
     # these tests use the backends directly and cannot be built with dynamic loading
-    llama_build_and_test(test-barrier.cpp)
-    llama_build_and_test(test-quantize-fns.cpp)
-    llama_build_and_test(test-quantize-perf.cpp)
-    llama_build_and_test(test-rope.cpp)
-    llama_build_and_test(test-col2im-1d.cpp)
+    llama_build_and_test(test-barrier.cpp LINK ggml)
+    llama_build_and_test(test-quantize-fns.cpp LINK ggml)
+    llama_build_and_test(test-quantize-perf.cpp LINK ggml)
+    llama_build_and_test(test-rope.cpp LINK ggml)
+    llama_build_and_test(test-col2im-1d.cpp LINK ggml)
+    llama_build_and_test(test-conv-1d.cpp LINK ggml)
+    llama_build_and_test(test-gelu-quick.cpp LINK ggml)
 endif()
 
 # libmtmd

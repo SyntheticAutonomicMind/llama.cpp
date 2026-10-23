@@ -3509,186 +3509,226 @@ common_params_context common_params_parser_init(common_params & params,
                 })
                 .set_examples({ LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI })
                 .set_env("LLAMA_ARG_REASONING_PRESERVE"));
-    add_opt(
-        common_arg({ "--chat-template" }, "JINJA_TEMPLATE",
-                   string_format("set custom jinja chat template (default: template taken from model's metadata)\n"
-                                 "if suffix/prefix are specified, template will be disabled\n"
-                                 "only commonly used templates are accepted (unless --jinja is set before this flag):\n"
-                                 "list of built-in templates:\n%s",
-                                 list_builtin_chat_templates().c_str()),
-                   [](common_params & params, const std::string & value) { params.chat_template = value; })
-            .set_examples({ LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_MTMD })
-            .set_env("LLAMA_ARG_CHAT_TEMPLATE"));
-    add_opt(
-        common_arg({ "--chat-template-file" }, "JINJA_TEMPLATE_FILE",
-                   string_format("set custom jinja chat template file (default: template taken from model's metadata)\n"
-                                 "if suffix/prefix are specified, template will be disabled\n"
-                                 "only commonly used templates are accepted (unless --jinja is set before this flag):\n"
-                                 "list of built-in templates:\n%s",
-                                 list_builtin_chat_templates().c_str()),
-                   [](common_params & params, const std::string & value) { params.chat_template = read_file(value); })
-            .set_examples({ LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER })
-            .set_env("LLAMA_ARG_CHAT_TEMPLATE_FILE"));
     add_opt(common_arg(
-                { "--skip-chat-parsing" }, { "--no-skip-chat-parsing" },
-                string_format(
-                    "force a pure content parser, even if a Jinja template is specified; model will output everything "
-                    "in the content section, including any reasoning and/or tool calls (default: disabled)"),
-                [](common_params & params, bool value) { params.force_pure_content_parser = value; })
-                .set_examples({ LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER })
-                .set_env("LLAMA_ARG_SKIP_CHAT_PARSING"));
-    add_opt(common_arg({ "--prefill-assistant" }, { "--no-prefill-assistant" },
-                       string_format("whether to prefill the assistant's response if the last message is an assistant "
-                                     "message (default: prefill enabled)\n"
-                                     "when this flag is set, if the last message is an assistant message then it will "
-                                     "be treated as a full message and not prefilled\n"),
-                       [](common_params & params, bool value) { params.prefill_assistant = value; })
-                .set_examples({ LLAMA_EXAMPLE_SERVER })
-                .set_env("LLAMA_ARG_PREFILL_ASSISTANT"));
-    add_opt(common_arg({ "-sps", "--slot-prompt-similarity" }, "SIMILARITY",
-                       string_format("how much the prompt of a request must match the prompt of a slot in order to use "
-                                     "that slot (default: %.2f, 0.0 = disabled)\n",
-                                     params.slot_prompt_similarity),
-                       [](common_params & params, const std::string & value) {
-                           params.slot_prompt_similarity = std::stof(value);
-                       })
-                .set_examples({ LLAMA_EXAMPLE_SERVER }));
-    add_opt(
-        common_arg({ "--lora-init-without-apply" },
-                   string_format(
-                       "load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)",
-                       params.lora_init_without_apply ? "enabled" : "disabled"),
-                   [](common_params & params) { params.lora_init_without_apply = true; })
-            .set_examples({ LLAMA_EXAMPLE_SERVER }));
-    add_opt(
-        common_arg({ "--sleep-idle-seconds" }, "SECONDS",
-                   string_format(
-                       "number of seconds of idleness after which the server will sleep (default: %d; -1 = disabled)",
-                       params.sleep_idle_seconds),
-                   [](common_params & params, int value) {
-                       if (value == 0 || value < -1) {
-                           throw std::invalid_argument("invalid value: cannot be 0 or less than -1");
-                       }
-                       params.sleep_idle_seconds = value;
-                   })
-            .set_examples({ LLAMA_EXAMPLE_SERVER }));
-    add_opt(common_arg({ "--simple-io" }, "use basic IO for better compatibility in subprocesses and limited consoles",
-                       [](common_params & params) { params.simple_io = true; })
-                .set_examples({ LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI }));
-    add_opt(common_arg({ "--positive-file" }, "FNAME",
-                       string_format("positive prompts file, one prompt per line (default: '%s')",
-                                     params.cvector_positive_file.c_str()),
-                       [](common_params & params, const std::string & value) { params.cvector_positive_file = value; })
-                .set_examples({ LLAMA_EXAMPLE_CVECTOR_GENERATOR }));
-    add_opt(common_arg({ "--negative-file" }, "FNAME",
-                       string_format("negative prompts file, one prompt per line (default: '%s')",
-                                     params.cvector_negative_file.c_str()),
-                       [](common_params & params, const std::string & value) { params.cvector_negative_file = value; })
-                .set_examples({ LLAMA_EXAMPLE_CVECTOR_GENERATOR }));
+        {"--chat-template"}, "JINJA_TEMPLATE",
+        string_format(
+            "set custom jinja chat template (default: template taken from model's metadata)\n"
+            "if suffix/prefix are specified, template will be disabled\n"
+            "only commonly used templates are accepted (unless --jinja is set before this flag):\n"
+            "list of built-in templates:\n%s", list_builtin_chat_templates().c_str()
+        ),
+        [](common_params & params, const std::string & value) {
+            params.chat_template = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_MTMD}).set_env("LLAMA_ARG_CHAT_TEMPLATE"));
     add_opt(common_arg(
-                { "--pca-batch" }, "N",
-                string_format("batch size used for PCA. Larger batch runs faster, but uses more memory (default: %d)",
-                              params.n_pca_batch),
-                [](common_params & params, int value) { params.n_pca_batch = value; })
-                .set_examples({ LLAMA_EXAMPLE_CVECTOR_GENERATOR }));
-    add_opt(common_arg({ "--pca-iter" }, "N",
-                       string_format("number of iterations used for PCA (default: %d)", params.n_pca_iterations),
-                       [](common_params & params, int value) { params.n_pca_iterations = value; })
-                .set_examples({ LLAMA_EXAMPLE_CVECTOR_GENERATOR }));
-    add_opt(common_arg({ "--method" }, "{pca, mean}", "dimensionality reduction method to be used (default: pca)",
-                       [](common_params & params, const std::string & value) {
-                           /**/ if (value == "pca") {
-                               params.cvector_dimre_method = DIMRE_METHOD_PCA;
-                           } else if (value == "mean") {
-                               params.cvector_dimre_method = DIMRE_METHOD_MEAN;
-                           } else {
-                               throw std::invalid_argument("invalid value");
-                           }
-                       })
-                .set_examples({ LLAMA_EXAMPLE_CVECTOR_GENERATOR }));
-    add_opt(common_arg({ "--output-format" }, "{md,jsonl}", "output format for batched-bench results (default: md)",
-                       [](common_params & params, const std::string & value) {
-                           /**/ if (value == "jsonl") {
-                               params.batched_bench_output_jsonl = true;
-                           } else if (value == "md") {
-                               params.batched_bench_output_jsonl = false;
-                           } else {
-                               throw std::invalid_argument("invalid value");
-                           }
-                       })
-                .set_examples({ LLAMA_EXAMPLE_BENCH }));
-    add_opt(
-        common_arg({ "--log-disable" }, "Log disable", [](common_params &) { common_log_pause(common_log_main()); }));
-    add_opt(common_arg({ "--log-file" }, "FNAME", "Log to file", [](common_params &, const std::string & value) {
-                common_log_set_file(common_log_main(), value.c_str());
-            }).set_env("LLAMA_ARG_LOG_FILE"));
-    add_opt(
-        common_arg(
-            { "--log-jsonl" }, { "--no-log-jsonl" },
-            "Log as JSONL (one JSON object per line) to stdout, this also disables colored logging (default: disabled)",
-            [](common_params &, bool value) { common_log_set_jsonl(value); })
-            .set_env("LLAMA_ARG_LOG_JSONL"));
-    add_opt(
-        common_arg({ "--log-prompts-dir" }, "PATH",
-                   "Log prompts to directory (auto-created if not present; only used for debugging, default: disabled)",
-                   [](common_params & params, const std::string & value) {
-                       params.path_prompts_log_dir = value;
-                       std::error_code ec;
-                       std::filesystem::create_directories(value, ec);
-                       if (ec) {
-                           fprintf(stderr, "warning: failed to create prompts-log-dir '%s': %s\n", value.c_str(),
-                                   ec.message().c_str());
-                       }
-                   })
-            .set_examples({ LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI }));
-    add_opt(common_arg({ "--log-colors" }, "[on|off|auto]",
-                       "Set colored logging ('on', 'off', or 'auto', default: 'auto')\n"
-                       "'auto' enables colors when output is to a terminal",
-                       [](common_params &, const std::string & value) {
-                           if (is_truthy(value)) {
-                               common_log_set_colors(common_log_main(), LOG_COLORS_ENABLED);
-                           } else if (is_falsey(value)) {
-                               common_log_set_colors(common_log_main(), LOG_COLORS_DISABLED);
-                           } else if (is_autoy(value)) {
-                               common_log_set_colors(common_log_main(), LOG_COLORS_AUTO);
-                           } else {
-                               throw std::invalid_argument(
-                                   string_format("error: unknown value for --log-colors: '%s'\n", value.c_str()));
-                           }
-                       })
-                .set_env("LLAMA_ARG_LOG_COLORS"));
-    add_opt(common_arg({ "-v", "--verbose", "--log-verbose" },
-                       "Set verbosity level to infinity (i.e. log all messages, useful for debugging)",
-                       [](common_params & params) {
-                           params.verbosity = INT_MAX;
-                           common_log_set_verbosity_thold(INT_MAX);
-                       }));
-    add_opt(common_arg({ "--offline" }, "Offline mode: forces use of cache, prevents network access",
-                       [](common_params & params) { params.offline = true; })
-                .set_examples({ LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE })
-                .set_env("LLAMA_ARG_OFFLINE"));
+        {"--chat-template-file"}, "JINJA_TEMPLATE_FILE",
+        string_format(
+            "set custom jinja chat template file (default: template taken from model's metadata)\n"
+            "if suffix/prefix are specified, template will be disabled\n"
+            "only commonly used templates are accepted (unless --jinja is set before this flag):\n"
+            "list of built-in templates:\n%s", list_builtin_chat_templates().c_str()
+        ),
+        [](common_params & params, const std::string & value) {
+            params.chat_template = read_file(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CHAT_TEMPLATE_FILE"));
     add_opt(common_arg(
-                { "-lv", "--verbosity", "--log-verbosity" }, "N",
-                string_format("Set the verbosity threshold. Messages with a higher verbosity will be ignored. Values:\n"
-                              " - 0: generic output\n"
-                              " - 1: error\n"
-                              " - 2: warning\n"
-                              " - 3: info\n"
-                              " - 4: trace (more info)\n"
-                              " - 5: debug\n"
-                              "(default: %d)\n",
-                              params.verbosity),
-                [](common_params & params, int value) {
-                    params.verbosity = value;
-                    common_log_set_verbosity_thold(value);
-                })
-                .set_env("LLAMA_ARG_LOG_VERBOSITY"));
-    add_opt(common_arg({ "--log-prefix" }, { "--no-log-prefix" }, "Enable prefix in log messages",
-                       [](common_params &, bool value) { common_log_set_prefix(common_log_main(), value); })
-                .set_env("LLAMA_ARG_LOG_PREFIX"));
-    add_opt(common_arg({ "--log-timestamps" }, { "--no-log-timestamps" }, "Enable timestamps in log messages",
-                       [](common_params &, bool value) { common_log_set_timestamps(common_log_main(), value); })
-                .set_env("LLAMA_ARG_LOG_TIMESTAMPS"));
+        {"--skip-chat-parsing"},
+        {"--no-skip-chat-parsing"},
+        string_format(
+            "force a pure content parser, even if a Jinja template is specified; model will output everything "
+            "in the content section, including any reasoning and/or tool calls (default: disabled)"
+        ),
+        [](common_params & params, bool value) {
+            params.force_pure_content_parser = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SKIP_CHAT_PARSING"));
+    add_opt(common_arg(
+        {"--prefill-assistant"},
+        {"--no-prefill-assistant"},
+        string_format(
+            "whether to prefill the assistant's response if the last message is an assistant message (default: prefill enabled)\n"
+            "when this flag is set, if the last message is an assistant message then it will be treated as a full message and not prefilled\n"
+        ),
+        [](common_params & params, bool value) {
+            params.prefill_assistant = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_PREFILL_ASSISTANT"));
+    add_opt(common_arg(
+        {"-sps", "--slot-prompt-similarity"}, "SIMILARITY",
+        string_format("how much the prompt of a request must match the prompt of a slot in order to use that slot (default: %.2f, 0.0 = disabled)\n", params.slot_prompt_similarity),
+        [](common_params & params, const std::string & value) {
+            params.slot_prompt_similarity = std::stof(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--lora-init-without-apply"},
+        string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
+        [](common_params & params) {
+            params.lora_init_without_apply = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--sleep-idle-seconds"}, "SECONDS",
+        string_format("number of seconds of idleness after which the server will sleep (default: %d; -1 = disabled)", params.sleep_idle_seconds),
+        [](common_params & params, int value) {
+            if (value == 0 || value < -1) {
+                throw std::invalid_argument("invalid value: cannot be 0 or less than -1");
+            }
+            params.sleep_idle_seconds = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--simple-io"},
+        "use basic IO for better compatibility in subprocesses and limited consoles",
+        [](common_params & params) {
+            params.simple_io = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--positive-file"}, "FNAME",
+        string_format("positive prompts file, one prompt per line (default: '%s')", params.cvector_positive_file.c_str()),
+        [](common_params & params, const std::string & value) {
+            params.cvector_positive_file = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CVECTOR_GENERATOR}));
+    add_opt(common_arg(
+        {"--negative-file"}, "FNAME",
+        string_format("negative prompts file, one prompt per line (default: '%s')", params.cvector_negative_file.c_str()),
+        [](common_params & params, const std::string & value) {
+            params.cvector_negative_file = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CVECTOR_GENERATOR}));
+    add_opt(common_arg(
+        {"--pca-batch"}, "N",
+        string_format("batch size used for PCA. Larger batch runs faster, but uses more memory (default: %d)", params.n_pca_batch),
+        [](common_params & params, int value) {
+            params.n_pca_batch = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CVECTOR_GENERATOR}));
+    add_opt(common_arg(
+        {"--pca-iter"}, "N",
+        string_format("number of iterations used for PCA (default: %d)", params.n_pca_iterations),
+        [](common_params & params, int value) {
+            params.n_pca_iterations = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CVECTOR_GENERATOR}));
+    add_opt(common_arg(
+        {"--method"}, "{pca, mean}",
+        "dimensionality reduction method to be used (default: pca)",
+        [](common_params & params, const std::string & value) {
+            /**/ if (value == "pca") { params.cvector_dimre_method = DIMRE_METHOD_PCA; }
+            else if (value == "mean") { params.cvector_dimre_method = DIMRE_METHOD_MEAN; }
+            else { throw std::invalid_argument("invalid value"); }
+        }
+    ).set_examples({LLAMA_EXAMPLE_CVECTOR_GENERATOR}));
+    add_opt(common_arg(
+        {"--output-format"}, "{md,jsonl}",
+        "output format for batched-bench results (default: md)",
+        [](common_params & params, const std::string & value) {
+            /**/ if (value == "jsonl") { params.batched_bench_output_jsonl = true; }
+            else if (value == "md") { params.batched_bench_output_jsonl = false; }
+            else { throw std::invalid_argument("invalid value"); }
+        }
+    ).set_examples({LLAMA_EXAMPLE_BENCH}));
+    add_opt(common_arg(
+        {"--log-disable"},
+        "Log disable",
+        [](common_params &) {
+            common_log_pause(common_log_main());
+        }
+    ));
+    add_opt(common_arg(
+        {"--log-file"}, "FNAME",
+        "Log to file",
+        [](common_params &, const std::string & value) {
+            common_log_set_file(common_log_main(), value.c_str());
+        }
+    ).set_env("LLAMA_ARG_LOG_FILE"));
+    add_opt(common_arg(
+        {"--log-jsonl"},
+        {"--no-log-jsonl"},
+        "Log as JSONL (one JSON object per line) to stdout, this also disables colored logging (default: disabled)",
+        [](common_params &, bool value) {
+            common_log_set_jsonl(value);
+        }
+    ).set_env("LLAMA_ARG_LOG_JSONL"));
+    add_opt(common_arg(
+        {"--log-prompts-dir"}, "PATH",
+        "Log prompts to directory (auto-created if not present; only used for debugging, default: disabled)",
+        [](common_params & params, const std::string & value) {
+            params.path_prompts_log_dir = value;
+            std::error_code ec;
+            std::filesystem::create_directories(value, ec);
+            if (ec) {
+                fprintf(stderr, "warning: failed to create prompts-log-dir '%s': %s\n", value.c_str(), ec.message().c_str());
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--log-colors"}, "[on|off|auto]",
+        "Set colored logging ('on', 'off', or 'auto', default: 'auto')\n"
+        "'auto' enables colors when output is to a terminal",
+        [](common_params &, const std::string & value) {
+            if (is_truthy(value)) {
+                common_log_set_colors(common_log_main(), LOG_COLORS_ENABLED);
+            } else if (is_falsey(value)) {
+                common_log_set_colors(common_log_main(), LOG_COLORS_DISABLED);
+            } else if (is_autoy(value)) {
+                common_log_set_colors(common_log_main(), LOG_COLORS_AUTO);
+            } else {
+                throw std::invalid_argument(
+                    string_format("error: unknown value for --log-colors: '%s'\n", value.c_str()));
+            }
+        }
+    ).set_env("LLAMA_ARG_LOG_COLORS"));
+    add_opt(common_arg(
+        {"-v", "--verbose", "--log-verbose"},
+        "Set verbosity level to infinity (i.e. log all messages, useful for debugging)",
+        [](common_params & params) {
+            params.verbosity = INT_MAX;
+            common_log_set_verbosity_thold(INT_MAX);
+        }
+    ));
+    add_opt(common_arg(
+        {"--offline"},
+        "Offline mode: forces use of cache, prevents network access",
+        [](common_params & params) {
+            params.offline = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LLAMA_ARG_OFFLINE"));
+    add_opt(common_arg(
+        {"-lv", "--verbosity", "--log-verbosity"}, "N",
+        string_format("Set the verbosity threshold. Messages with a higher verbosity will be ignored. Values:\n"
+            " - 0: generic output\n"
+            " - 1: error\n"
+            " - 2: warning\n"
+            " - 3: info\n"
+            " - 4: trace (more info)\n"
+            " - 5: debug\n"
+            "(default: %d)\n", params.verbosity),
+        [](common_params & params, int value) {
+            params.verbosity = value;
+            common_log_set_verbosity_thold(value);
+        }
+    ).set_env("LLAMA_ARG_LOG_VERBOSITY"));
+    add_opt(common_arg(
+        {"--log-prefix"},
+        {"--no-log-prefix"},
+        "Enable prefix in log messages",
+        [](common_params &, bool value) {
+            common_log_set_prefix(common_log_main(), value);
+        }
+    ).set_env("LLAMA_ARG_LOG_PREFIX"));
+    add_opt(common_arg(
+        {"--log-timestamps"},
+        {"--no-log-timestamps"},
+        "Enable timestamps in log messages",
+        [](common_params &, bool value) {
+            common_log_set_timestamps(common_log_main(), value);
+        }
+    ).set_env("LLAMA_ARG_LOG_TIMESTAMPS"));
 
     //
     // speculative parameters

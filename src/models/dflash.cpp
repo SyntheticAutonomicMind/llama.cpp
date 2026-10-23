@@ -181,12 +181,13 @@ void llama_model_dflash::load_arch_tensors(llama_model_loader &) {
         create_tensor(tn(LLM_TENSOR_ENC_OUTPUT_NORM, "weight"), { n_embd }, 0);        // encoder hidden_norm (after fc)
     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), { n_embd }, 0);  // decoder final norm
 
-    // Laguna drafters RMS-norm each captured target feature before concat + fc;
+// Laguna drafters RMS-norm each captured target feature before concat + fc;
     // the per-aux weights are stacked to [n_embd, n_aux] at conversion time.
     if (model_df.decoder_laguna) {
         aux_norm =
             create_tensor(tn(LLM_TENSOR_ENC_AUX_NORM, "weight"), { n_embd, (int64_t) target_layer_ids.size() }, 0);
     }
+    fc_in_s = create_tensor(tn(LLM_TENSOR_FC, "input_scale"), { 1 }, TENSOR_NOT_REQUIRED);
 
     // optional: reduced-vocab drafts ship their own lm head, full-vocab drafts can share the target's via ctx_other
 
